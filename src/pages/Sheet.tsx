@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
 export function Sheet({ initialUrl }: { initialUrl?: string }) {
-  const { columns, rows, loadSource } = useCSVLoader();
+  const { columns, rows, loadSource, updateCell, applyPaste, clearCells } = useCSVLoader();
   const [colsState, setColsState] = useState(columns);
 
   // Persist and sync columns width
@@ -169,6 +169,19 @@ export function Sheet({ initialUrl }: { initialUrl?: string }) {
           onSelectionChange={setSelection}
           onColumnsResize={handleColumnsResize}
           onHeaderClick={toggleSort}
+          onEditCell={(r, c, v) => updateCell(viewIndices[r], c, v)}
+          onPaste={(r, c, vals) => {
+            const absStart = viewIndices[r];
+            applyPaste(absStart, c, vals);
+          }}
+          onClear={(cells) => {
+            const mapped = cells.map(({ row, col }) => ({ row: viewIndices[row], col }));
+            clearCells(mapped);
+          }}
+          onFocusFilter={() => {
+            const el = document.getElementById('csv-url');
+            if (el instanceof HTMLElement) el.focus();
+          }}
         />
       </div>
       <div className="border-t bg-card/50 backdrop-blur supports-[backdrop-filter]:bg-card/50 px-3 py-1 text-xs text-muted-foreground flex items-center gap-4">

@@ -118,5 +118,52 @@ export function useCSVLoader() {
     ...state,
     loadSource,
     reset,
+    updateCell: (rowIndex: number, colIndex: number, value: string) => {
+      setState(prev => {
+        const nextRows = prev.rows.slice();
+        const r = nextRows[rowIndex] ? nextRows[rowIndex].slice() : [];
+        // Ensure width
+        if (colIndex >= r.length) r.length = colIndex + 1;
+        r[colIndex] = value;
+        nextRows[rowIndex] = r;
+        return { ...prev, rows: nextRows };
+      });
+    },
+    applyPaste: (startRow: number, startCol: number, values: string[][]) => {
+      setState(prev => {
+        const nextRows = prev.rows.slice();
+        for (let rOff = 0; rOff < values.length; rOff++) {
+          const rIndex = startRow + rOff;
+          const src = values[rOff];
+          const row = nextRows[rIndex] ? nextRows[rIndex].slice() : [];
+          for (let cOff = 0; cOff < src.length; cOff++) {
+            const cIndex = startCol + cOff;
+            if (cIndex >= row.length) row.length = cIndex + 1;
+            row[cIndex] = src[cOff];
+          }
+          nextRows[rIndex] = row;
+        }
+        return { ...prev, rows: nextRows };
+      });
+    },
+    clearCells: (cells: Array<{ row: number; col: number }>) => {
+      setState(prev => {
+        if (cells.length === 0) return prev;
+        const nextRows = prev.rows.slice();
+        const touched = new Map<number, number[]>();
+        for (const { row, col } of cells) {
+          if (!touched.has(row)) touched.set(row, []);
+          touched.get(row)!.push(col);
+        }
+        for (const [rIndex, cols] of touched) {
+          const row = nextRows[rIndex] ? nextRows[rIndex].slice() : [];
+          for (const col of cols) {
+            if (col < row.length) row[col] = "";
+          }
+          nextRows[rIndex] = row;
+        }
+        return { ...prev, rows: nextRows };
+      });
+    },
   };
 }
