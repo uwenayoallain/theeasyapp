@@ -33,22 +33,23 @@ Example:
   process.exit(0);
 }
 
-const toCamelCase = (str: string): string => str.replace(/-([a-z])/g, g => g[1].toUpperCase());
+const toCamelCase = (str: string): string =>
+  str.replace(/-([a-z])/g, (_match, char: string) => char.toUpperCase());
 
-const parseValue = (value: string): any => {
+const parseValue = (value: string): unknown => {
   if (value === "true") return true;
   if (value === "false") return false;
 
   if (/^\d+$/.test(value)) return parseInt(value, 10);
   if (/^\d*\.\d+$/.test(value)) return parseFloat(value);
 
-  if (value.includes(",")) return value.split(",").map(v => v.trim());
+  if (value.includes(",")) return value.split(",").map((v) => v.trim());
 
   return value;
 };
 
 function parseArgs(): Partial<Bun.BuildConfig> {
-  const config: Partial<Bun.BuildConfig> = {};
+  const config: Record<string, unknown> = {};
   const args = process.argv.slice(2);
 
   for (let i = 0; i < args.length; i++) {
@@ -62,7 +63,10 @@ function parseArgs(): Partial<Bun.BuildConfig> {
       continue;
     }
 
-    if (!arg.includes("=") && (i === args.length - 1 || args[i + 1]?.startsWith("--"))) {
+    if (
+      !arg.includes("=") &&
+      (i === args.length - 1 || args[i + 1]?.startsWith("--"))
+    ) {
       const key = toCamelCase(arg.slice(2));
       config[key] = true;
       continue;
@@ -81,15 +85,19 @@ function parseArgs(): Partial<Bun.BuildConfig> {
     key = toCamelCase(key);
 
     if (key.includes(".")) {
-      const [parentKey, childKey] = key.split(".");
-      config[parentKey] = config[parentKey] || {};
-      config[parentKey][childKey] = parseValue(value);
+      const [parentKeyRaw, childKeyRaw] = key.split(".", 2);
+      if (!parentKeyRaw || !childKeyRaw) continue;
+      const parentKey = parentKeyRaw;
+      const childKey = childKeyRaw;
+      const parent = (config[parentKey] ?? {}) as Record<string, unknown>;
+      parent[childKey] = parseValue(value);
+      config[parentKey] = parent;
     } else {
       config[key] = parseValue(value);
     }
   }
 
-  return config;
+  return config as Partial<Bun.BuildConfig>;
 }
 
 const formatFileSize = (bytes: number): string => {
@@ -108,7 +116,10 @@ const formatFileSize = (bytes: number): string => {
 console.log("\n🚀 Starting build process...\n");
 
 const cliConfig = parseArgs();
-const outdir = cliConfig.outdir || path.join(process.cwd(), "dist");
+const outdir =
+  typeof cliConfig.outdir === "string" && cliConfig.outdir.length > 0
+    ? cliConfig.outdir
+    : path.join(process.cwd(), "dist");
 
 if (existsSync(outdir)) {
   console.log(`🗑️ Cleaning previous build at ${outdir}`);
@@ -118,9 +129,11 @@ if (existsSync(outdir)) {
 const start = performance.now();
 
 const entrypoints = [...new Bun.Glob("**.html").scanSync("src")]
-  .map(a => path.resolve("src", a))
-  .filter(dir => !dir.includes("node_modules"));
-console.log(`📄 Found ${entrypoints.length} HTML ${entrypoints.length === 1 ? "file" : "files"} to process\n`);
+  .map((a) => path.resolve("src", a))
+  .filter((dir) => !dir.includes("node_modules"));
+console.log(
+  `📄 Found ${entrypoints.length} HTML ${entrypoints.length === 1 ? "file" : "files"} to process\n`,
+);
 
 const result = await Bun.build({
   entrypoints,
@@ -135,13 +148,26 @@ const result = await Bun.build({
   ...cliConfig,
 });
 
+// Build the CSV worker as a separate asset for production
+const workerOutDir = path.join(outdir, "workers");
+const workerResult = await Bun.build({
+  entrypoints: [path.resolve("src", "workers/csvWorker.ts")],
+  outdir: workerOutDir,
+  target: "browser",
+  format: "esm",
+  minify: true,
+  sourcemap: "linked",
+});
+
 const end = performance.now();
 
-const outputTable = result.outputs.map(output => ({
-  File: path.relative(process.cwd(), output.path),
-  Type: output.kind,
-  Size: formatFileSize(output.size),
-}));
+const outputTable = [...result.outputs, ...workerResult.outputs].map(
+  (output) => ({
+    File: path.relative(process.cwd(), output.path),
+    Type: output.kind,
+    Size: formatFileSize(output.size),
+  }),
+);
 
 console.table(outputTable);
 const buildTime = (end - start).toFixed(2);

@@ -9,27 +9,36 @@ export interface ParseStreamOptions {
   batchSize?: number;
   totalBytes?: number;
   onColumns?: (cols: string[]) => void;
-  onRows?: (rows: CSVBatch) => void;
+  onRows?: (rows: CSVBatch) => void | Promise<void>;
   onProgress?: (p: StreamProgress) => void;
+  signal?: AbortSignal;
 }
 
 export async function parseStream(
   reader: ReadableStreamDefaultReader<Uint8Array>,
-  options: ParseStreamOptions
+  options: ParseStreamOptions,
 ) {
   const decoder = new TextDecoder();
   const batchSize = options.batchSize ?? 2000;
   let loaded = 0;
 
-  let carry = ""; // leftover from previous chunk
+  let carry = "";
   let inQuotes = false;
   let headerParsed = false;
   let columns: string[] = [];
   const batch: string[][] = [];
 
-  const flushBatch = () => {
+  const throwIfAborted = () => {
+    if (options.signal?.aborted) {
+      throw new DOMException("Aborted", "AbortError");
+    }
+  };
+
+  const flushBatch = async () => {
     if (batch.length > 0) {
-      options.onRows?.(batch.splice(0, batch.length));
+      throwIfAborted();
+      const rowsToSend = batch.splice(0, batch.length);
+      await options.onRows?.(rowsToSend);
     }
   };
 
@@ -41,21 +50,21 @@ export async function parseStream(
     const row: string[] = [];
     let field = "";
     let i = 0;
-    inQuotes = false;
+    let q = false;
 
     while (i < line.length) {
       const ch = line[i];
       if (ch === '"') {
-        if (inQuotes && line[i + 1] === '"') {
+        if (q && line[i + 1] === '"') {
           field += '"';
           i += 2;
           continue;
         }
-        inQuotes = !inQuotes;
+        q = !q;
         i++;
         continue;
       }
-      if (ch === "," && !inQuotes) {
+      if (ch === "," && !q) {
         row.push(field);
         field = "";
         i++;
@@ -68,45 +77,58 @@ export async function parseStream(
     return row;
   };
 
-  while (true) {
+  let doneReading = false;
+  while (!doneReading) {
+    throwIfAborted();
     const { value, done } = await reader.read();
-    if (done) break;
+    if (done) {
+      doneReading = true;
+      continue;
+    }
     loaded += value.byteLength;
     emitProgress();
 
-    const chunkText = decoder.decode(value, { stream: true });
-    let text = carry + chunkText;
-    carry = "";
-
-    // Split into lines but preserve trailing partial
-    const lines = text.split(/\r?\n/);
-    if (lines.length > 0) {
-      carry = lines.pop() ?? "";
-    }
-
-    for (const rawLine of lines) {
-      if (!headerParsed) {
-        columns = parseLine(rawLine);
-        headerParsed = true;
-        options.onColumns?.(columns);
+    const text = decoder.decode(value, { stream: true });
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      carry += ch;
+      if (ch === '"') {
+        if (inQuotes && text[i + 1] === '"') {
+          carry += '"';
+          i++;
+          continue;
+        }
+        inQuotes = !inQuotes;
         continue;
       }
-      if (!rawLine) continue;
-      batch.push(parseLine(rawLine));
-      if (batch.length >= batchSize) flushBatch();
+      if (!inQuotes && ch === "\n") {
+        const record = carry.endsWith("\r\n")
+          ? carry.slice(0, -2)
+          : carry.slice(0, -1);
+        if (record.length > 0 || headerParsed) {
+          if (!headerParsed) {
+            columns = parseLine(record);
+            headerParsed = true;
+            options.onColumns?.(columns);
+          } else {
+            batch.push(parseLine(record));
+            if (batch.length >= batchSize) await flushBatch();
+          }
+        }
+        carry = "";
+      }
     }
   }
 
-  // Finalize any remaining decoded text
-  if (carry) {
+  if (carry && !inQuotes) {
     if (!headerParsed) {
       const header = parseLine(carry);
       options.onColumns?.(header);
-    } else if (!inQuotes) {
+    } else {
       batch.push(parseLine(carry));
     }
   }
 
-  flushBatch();
+  await flushBatch();
   options.onProgress?.({ loaded, total: options.totalBytes });
 }

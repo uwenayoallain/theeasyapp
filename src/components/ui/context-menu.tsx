@@ -10,21 +10,32 @@ type ContextMenuProps = {
   className?: string;
 };
 
-export function ContextMenu({ open, x, y, onClose, children, className }: ContextMenuProps) {
+export function ContextMenu({
+  open,
+  x,
+  y,
+  onClose,
+  children,
+  className,
+}: ContextMenuProps) {
   if (!open) return null;
 
   const handleBackdropClick = () => onClose();
   const stop = (e: MouseEvent) => e.stopPropagation();
 
   return (
-    <div className="fixed inset-0 z-50" onClick={handleBackdropClick} onContextMenu={(e) => e.preventDefault()}>
+    <div
+      className="fixed inset-0 z-50"
+      onClick={handleBackdropClick}
+      onContextMenu={(e) => e.preventDefault()}
+    >
       <div
         role="menu"
         className={cn(
           "min-w-40 max-w-64 rounded-md border bg-popover text-popover-foreground shadow-md p-1",
           "select-none",
           "data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95",
-          className
+          className,
         )}
         style={{ position: "fixed", left: x, top: y }}
         onClick={stop}
@@ -59,8 +70,10 @@ export function ContextMenuItem({
       aria-disabled={disabled}
       className={cn(
         "relative flex cursor-default items-center gap-2 rounded-sm px-2 py-1.5 text-sm outline-none",
-        disabled ? "opacity-50" : "hover:bg-accent hover:text-accent-foreground",
-        className
+        disabled
+          ? "opacity-50"
+          : "hover:bg-accent hover:text-accent-foreground",
+        className,
       )}
       onClick={handleClick}
     >
@@ -72,4 +85,3 @@ export function ContextMenuItem({
 export function ContextMenuSeparator() {
   return <div className="-mx-1 my-1 h-px bg-border" />;
 }
-

@@ -36,8 +36,8 @@ bun start
 
 ## Development Conventions
 
-*   **Package Management:** This project uses [Bun](https://bun.sh/) for package management. Use `bun install` to install dependencies.
-*   **Styling:** [Tailwind CSS](https://tailwindcss.com/) is used for styling. Utility classes are preferred.
-*   **Components:** [shadcn/ui](https://ui.shadcn.com/) components are used. These are unstyled components that can be customized with Tailwind CSS.
-*   **API:** The backend API is defined in `src/index.tsx`. New routes can be added to the `routes` object.
-*   **TypeScript:** The project uses TypeScript with strict mode enabled. Path aliases are configured in `tsconfig.json` to allow for absolute imports from the `src` directory (e.g., `import { Button } from "@/components/ui/button";`).
+- **Package Management:** This project uses [Bun](https://bun.sh/) for package management. Use `bun install` to install dependencies.
+- **Styling:** [Tailwind CSS](https://tailwindcss.com/) is used for styling. Utility classes are preferred.
+- **Components:** [shadcn/ui](https://ui.shadcn.com/) components are used. These are unstyled components that can be customized with Tailwind CSS.
+- **API:** The backend API is defined in `src/index.tsx`. New routes can be added to the `routes` object.
+- **TypeScript:** The project uses TypeScript with strict mode enabled. Path aliases are configured in `tsconfig.json` to allow for absolute imports from the `src` directory (e.g., `import { Button } from "@/components/ui/button";`).
