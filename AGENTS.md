@@ -1,30 +1,34 @@
 # Repository Guidelines
 
+This repository powers a Bun + TanStack Router app. Keep changes focused, lean on the existing automation, and document anything that impacts other contributors.
+
 ## Project Structure & Module Organization
 
-The application lives under `src/`, with UI components in `src/components`, data utilities in `src/lib` and `src/data`, and route definitions in `src/routes` backed by the generated `routeTree.gen.ts`. Hooks and shared state management belong in `src/hooks`, while workers sit inside `src/workers` for isolated browser tasks. Keep tests co-located as `*.test.ts[x]`, static assets in `public/`, global styles in `styles/`, and automation scripts inside `scripts/`. Built bundles land in `dist/`; treat it as ephemeral output.
+- App source lives in `src/`, with UI components under `src/components`, hooks in `src/hooks`, and shared utilities in `src/lib` and `src/data`.
+- Routes are defined in `src/routes` and backed by the generated `src/routeTree.gen.ts`; never edit generated artifacts directly.
+- Co-locate tests as `*.test.ts[x]`, store static assets in `public/`, and treat `dist/` as throwaway build output.
 
 ## Build, Test, and Development Commands
 
-- `bun install`: install dependencies (CI uses `bun install --frozen-lockfile`).
-- `bun dev`: start the local dev server with HMR and route regeneration.
-- `bunx tsc --noEmit`: run the strict TypeScript check without writing output.
-- `bun test`: execute the full Vitest-powered suite; target individual files with `bun test src/lib/csvParser.test.ts` or narrow cases via `-t`.
-- `bunx eslint . --ext .ts,.tsx` and `bunx prettier --check .`: enforce linting and formatting; add `--write` locally when you mean to fix violations.
-- `bun run ci`: pipeline entry point combining type-check, tests, lint, format check, and TanStack Router generation.
+- `bun install` installs dependencies; CI uses `bun install --frozen-lockfile` to pin versions.
+- `bun dev` starts the dev server with HMR and regenerates the TanStack route tree.
+- `bunx tsc --noEmit` enforces strict typing without emitting artifacts.
+- `bun test` runs the Vitest suite; filter via `bun test src/lib/csvParser.test.ts -t "edge case"`.
+- `bunx eslint . --ext .ts,.tsx` and `bunx prettier --check .` keep linting and formatting consistent; add `--write` locally when fixing issues.
+- `bun run ci` stitches together type check, tests, lint, format check, and router generation for a pre-PR smoke test.
 
 ## Coding Style & Naming Conventions
 
-Write modern ESM TypeScript, importing types via `import type` and preferring the `@/` alias for internal modules. Rely on Prettier defaults for formatting and do not disable lint rules inline unless you document the rationale. Components and hooks use PascalCase, functions and variables camelCase, and constants upper snake case. Maintain pure React components, keep `src/components/ui/*` stateless, and wrap stable callbacks with `useCallback` when downstream refs depend on them.
+Write modern ESM TypeScript. Import types with `import type`, prefer the `@/` alias for internal modules, and follow PascalCase for components/hooks, camelCase for functions/variables, and UPPER_SNAKE_CASE for constants. Rely on Prettier defaults; avoid inline lint disables unless documented. Keep components pure, especially under `src/components/ui/*`, and wrap stable callbacks in `useCallback` when refs depend on them.
 
 ## Testing Guidelines
 
-Vitest drives the suite; co-locate tests beside the code under test and mirror filenames (e.g., `src/lib/csvParser.test.ts`). Aim for meaningful coverage on parsing, filtering, and DuckDB integrations—focus on edge cases around streaming data. Run `bun test` before every commit and rely on `bun run ci` prior to PRs for a full signal. Use descriptive `describe` blocks and prefer integration-style tests when verifying router flows.
+Vitest powers the suite. Mirror filenames (`src/lib/parser.ts` → `src/lib/parser.test.ts`) and aim for meaningful coverage on parsing, filtering, and DuckDB integration paths. Favor integration-style tests for router flows and target edge cases like streaming failures. Run `bun test` before every commit.
 
 ## Commit & Pull Request Guidelines
 
-Commits follow Conventional Commits (`feat:`, `fix:`, `chore:` etc.) and should remain focused so reverts stay surgical. Before opening a PR, ensure TypeScript, lint, format, and tests are green; attach relevant screenshots or recordings for UI shifts and reference issues in the description. Document behavioral or schema changes, call out follow-up work, and request review only when automation passes.
+Use Conventional Commit prefixes (e.g., `feat:`, `fix:`, `chore:`) and keep commits surgical so reverts stay easy. Before raising a PR, ensure `bun run ci` passes, summarize behavior changes, link issues, and attach UI screenshots or recordings when applicable. Call out follow-up tasks and note any schema shifts.
 
 ## Security & Configuration Tips
 
-Never commit secrets; only variables prefixed with `BUN_PUBLIC_` are safe for the client bundle, so keep service credentials server-side. Regenerate TanStack Router files with `bun run ci` or `bun run build` when routes change, and avoid editing generated artifacts by hand. Audit third-party API integrations under `src/lib` for rate limits and cancellation handling—treat `AbortError` as an expected cancellation path and log ignored failures with `console.warn`.
+Never commit secrets. Only expose environment variables prefixed with `BUN_PUBLIC_` to the client bundle. When routes change, regenerate TanStack files via `bun run ci` or `bun run build` instead of hand-editing generated code. Treat `AbortError` as an expected cancellation path and prefer `console.warn` for ignored failures.
