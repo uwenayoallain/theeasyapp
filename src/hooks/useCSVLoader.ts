@@ -2,37 +2,36 @@ import { useState, useCallback, useRef, useEffect } from "react";
 import { DEFAULT_DUCKDB_TABLE } from "@/constants/duckdb";
 import type { ColumnDef } from "@/lib/csv";
 import { fetchAndParseCSV, parseCSVFile } from "@/lib/csvParser";
+import { parseExcelFile } from "@/lib/excelParser";
+import { isExcelFile } from "@/lib/validators";
 import { csvEvent } from "@/lib/perf";
 import { useToast } from "@/components/ui/toast-provider";
+import { sanitizeTableName } from "@/lib/duckdb-utils";
 
 const MAX_BUFFER_SIZE = 10000;
 const MAX_FILE_SIZE = 500 * 1024 * 1024;
 const WARN_FILE_SIZE = 100 * 1024 * 1024;
-const ALLOWED_MIME_TYPES = ["text/csv", "application/csv", "text/plain", ""];
+const ALLOWED_MIME_TYPES = [
+  "text/csv",
+  "application/csv",
+  "text/plain",
+  "text/tab-separated-values",
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "",
+];
 
-const csvWorkerFactory = () => {
+function createWorker(path: string, fallbackName: string): Worker | null {
   try {
-    return new Worker("/workers/csv-worker.js", { type: "module" });
+    return new Worker(path, { type: "module" });
   } catch (error) {
-    console.warn(
-      "CSV worker unavailable, falling back to main-thread parsing:",
-      error,
-    );
+    console.warn(`${fallbackName} worker unavailable:`, error);
     return null;
   }
-};
+}
 
-const tableWorkerFactory = () => {
-  try {
-    return new Worker("/workers/table-worker.js", { type: "module" });
-  } catch (error) {
-    console.warn(
-      "DuckDB table worker unavailable, falling back to main-thread streaming:",
-      error,
-    );
-    return null;
-  }
-};
+const csvWorkerFactory = () => createWorker("/workers/csv-worker.js", "CSV");
+const tableWorkerFactory = () => createWorker("/workers/table-worker.js", "DuckDB table");
 
 type DuckDBSource = {
   type: "duckdb";
@@ -49,10 +48,6 @@ type CSVSource = {
 };
 
 type LoadSource = DuckDBSource | CSVSource;
-
-const tableNameRegex = /^[A-Za-z0-9_]+$/;
-const sanitizeTableName = (value?: string) =>
-  value && tableNameRegex.test(value) ? value : DEFAULT_DUCKDB_TABLE;
 
 type TableWorkerColumn = { name: string; type: string };
 
@@ -250,6 +245,25 @@ export function useCSVLoader() {
       const isDuckDB = source.type === "duckdb";
       const progressUnit: "bytes" | "rows" = isDuckDB ? "rows" : "bytes";
 
+      // OPTIMIZATION: Force DuckDB for large files (>5MB) or Excel files
+      if (!isDuckDB && source.file) {
+        const FORCE_DUCKDB_SIZE = 5 * 1024 * 1024; // 5MB
+        const isExcel = isExcelFile(source.file.name);
+
+        if (source.file.size > FORCE_DUCKDB_SIZE || isExcel) {
+          const reason = isExcel
+            ? "Excel files"
+            : `Files larger than ${(FORCE_DUCKDB_SIZE / 1024 / 1024).toFixed(0)}MB`;
+          showToast({
+            title: "Using database mode",
+            description: `${reason} are automatically loaded into DuckDB for better performance.`,
+          });
+
+          // Convert to DuckDB source
+          return loadSource({ type: "duckdb", file: source.file });
+        }
+      }
+
       if (!isDuckDB && source.file) {
         const fileSizeMb = (source.file.size / 1024 / 1024).toFixed(1);
         if (source.file.size > MAX_FILE_SIZE) {
@@ -269,17 +283,26 @@ export function useCSVLoader() {
           source.file.type &&
           !ALLOWED_MIME_TYPES.includes(source.file.type)
         ) {
-          setState({
-            columns: [],
-            rows: [],
-            progress: { loaded: 0, unit: progressUnit },
-            isLoading: false,
-            error: `Unsupported file type: ${source.file.type}. Only text/csv, application/csv, or text/plain are allowed.`,
-            rowCount: 0,
-            isChunked: false,
-            loadedRowIndices: [],
-          });
-          return;
+          const ext = source.file.name.split(".").pop()?.toLowerCase();
+          const isSupportedByExtension =
+            ext === "csv" ||
+            ext === "tsv" ||
+            ext === "xlsx" ||
+            ext === "xls";
+
+          if (!isSupportedByExtension) {
+            setState({
+              columns: [],
+              rows: [],
+              progress: { loaded: 0, unit: progressUnit },
+              isLoading: false,
+              error: `Unsupported file type: ${source.file.type}. Supported formats: CSV, TSV, Excel (.xlsx, .xls)`,
+              rowCount: 0,
+              isChunked: false,
+              loadedRowIndices: [],
+            });
+            return;
+          }
         }
         if (source.file.size > WARN_FILE_SIZE) {
           showToast({
@@ -344,14 +367,15 @@ export function useCSVLoader() {
       ensureRangeRef.current = null;
 
       if (isDuckDB) {
-        const table = sanitizeTableName(source.table);
+        const duckdbSource = source as DuckDBSource;
+        const table = sanitizeTableName(duckdbSource.table);
         duckdbTableRef.current = table;
         const datasetUrl =
-          typeof source.url === "string" ? source.url.trim() : undefined;
-        const file = source.file;
+          typeof duckdbSource.url === "string" ? duckdbSource.url.trim() : undefined;
+        const file = duckdbSource.file;
         const chunkSize =
-          source.batchSize && source.batchSize > 0
-            ? Math.floor(source.batchSize)
+          duckdbSource.batchSize && duckdbSource.batchSize > 0
+            ? Math.floor(duckdbSource.batchSize)
             : 2000;
         const worker = tableWorkerFactory();
 
@@ -805,7 +829,12 @@ export function useCSVLoader() {
         let result;
         const file = source.file;
         if (file) {
-          result = await parseCSVFile(file);
+          // Check if it's an Excel file
+          if (isExcelFile(file.name)) {
+            result = await parseExcelFile(file);
+          } else {
+            result = await parseCSVFile(file);
+          }
           setState((prev) => ({
             ...prev,
             progress: { loaded: file.size, unit: "bytes" },
@@ -816,7 +845,8 @@ export function useCSVLoader() {
           throw new Error("No source provided");
         }
         const endTime = performance.now();
-        console.log(`CSV parsed in ${(endTime - startTime).toFixed(2)}ms`);
+        const fileType = file && isExcelFile(file.name) ? "Excel" : "CSV";
+        console.log(`${fileType} parsed in ${(endTime - startTime).toFixed(2)}ms`);
         csvEvent("done", { ms: endTime - startTime });
         const loadedRowIndices = Array.from(
           { length: result.rows.length },

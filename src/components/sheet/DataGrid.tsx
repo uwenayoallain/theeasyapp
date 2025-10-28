@@ -18,6 +18,7 @@ import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { recordCommit } from "@/lib/perf";
 import { selectionToTSV } from "@/lib/export";
+import { clamp } from "@/lib/math-utils";
 
 interface SelectedCell {
   row: number;
@@ -72,7 +73,7 @@ export function DataGrid({
   focusCellRequest,
   sortState,
   filtersRow,
-  filtersHeight = 34,
+  filtersHeight = 32,
   headerHeight = 32,
   totalRows,
   onRangeChange,
@@ -243,11 +244,6 @@ export function DataGrid({
     navigator.clipboard?.writeText(text);
     closeMenu();
   }, [closeMenu, rows, selectedCells]);
-
-  const clamp = useCallback(
-    (v: number, min: number, max: number) => Math.max(min, Math.min(max, v)),
-    [],
-  );
 
   const ensureVisible = useCallback(
     (targetRow: number) => {
@@ -555,7 +551,6 @@ export function DataGrid({
     [
       anchorCell,
       applySelection,
-      clamp,
       columns,
       copySelection,
       editing,
@@ -576,7 +571,15 @@ export function DataGrid({
   );
 
   useEffect(() => {
-    if (editing) requestAnimationFrame(() => editorRef.current?.focus());
+    if (editing) {
+      requestAnimationFrame(() => {
+        const input = editorRef.current;
+        if (input) {
+          input.focus();
+          input.select();
+        }
+      });
+    }
   }, [editing]);
 
   return (
@@ -608,7 +611,7 @@ export function DataGrid({
         </div>
       )}
 
-      <div style={{ height: rowVirtual.getTotalSize(), position: "relative" }}>
+      <div style={{ height: rowVirtual.getTotalSize(), position: "relative", minHeight: 0 }}>
         <Header
           columns={columns}
           onColumnsResize={onColumnsResize}
@@ -617,7 +620,7 @@ export function DataGrid({
         />
         {filtersRow && (
           <div
-            className="sticky z-10 bg-background/90 backdrop-blur border-b px-1 py-1 grid"
+            className="sticky z-10 bg-background/90 backdrop-blur border-b px-1 py-0.5 grid gap-1"
             style={{
               top: headerHeight,
               gridTemplateColumns: columns
@@ -647,6 +650,7 @@ export function DataGrid({
             editorRef={editorRef}
             currentSearchKey={currentSearchKey ?? null}
             searchQuery={searchQuery ?? ""}
+            onEditCell={onEditCell}
           />
         ))}
         <ContextMenu open={menu.open} x={menu.x} y={menu.y} onClose={closeMenu}>
@@ -865,6 +869,7 @@ const Row = memo(function Row({
   editorRef,
   currentSearchKey,
   searchQuery,
+  onEditCell,
 }: {
   index: number;
   top: number;
@@ -888,6 +893,7 @@ const Row = memo(function Row({
   editorRef: React.RefObject<HTMLInputElement | null>;
   currentSearchKey: string | null;
   searchQuery: string;
+  onEditCell?: (row: number, col: number, value: string) => void;
 }) {
   return (
     <div
@@ -903,7 +909,7 @@ const Row = memo(function Row({
         contain: "content",
       }}
     >
-      {columns.map((c, i) => {
+      {columns.map((_, i) => {
         const cellKey = `${index}:${i}`;
         const isSelected = selectedCells.has(cellKey);
         const isEditing = !!(
@@ -951,12 +957,15 @@ const Row = memo(function Row({
                 defaultValue={editing.value}
                 onBlur={(e) => {
                   const nextVal = e.currentTarget.value;
-                  setEditing({ row: index, col: i, value: nextVal });
+                  onEditCell?.(index, i, nextVal);
+                  setEditing(null);
                 }}
                 onChange={(e) =>
                   setEditing({ row: index, col: i, value: e.target.value })
                 }
-                className="h-6 text-xs px-1 py-0 absolute inset-0 m-0"
+                className="absolute inset-0 m-0 h-full w-full rounded-none border-2 border-primary bg-background px-2 py-1 text-sm shadow-none focus-visible:ring-0"
+                onClick={(e) => e.stopPropagation()}
+                onMouseDown={(e) => e.stopPropagation()}
               />
             )}
           </div>

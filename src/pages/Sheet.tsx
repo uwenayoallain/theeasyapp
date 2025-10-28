@@ -10,11 +10,13 @@ import {
 import { DataGrid } from "@/components/sheet/DataGrid";
 import { SearchOverlay } from "@/components/sheet/SearchOverlay";
 import { ShortcutsHelp } from "@/components/sheet/ShortcutsHelp";
+import { FilterInput } from "@/components/sheet/FilterInput";
 import { useCSVLoader, type CSVLoaderState } from "@/hooks/useCSVLoader";
 import { useSheetSort } from "@/hooks/useSheetSort";
 import { useSheetFilters } from "@/hooks/useSheetFilters";
 import { useSheetSearch } from "@/hooks/useSheetSearch";
 import { useSheetKeyboardShortcuts } from "@/hooks/useSheetKeyboardShortcuts";
+import { useDebouncedValue } from "@/lib/useDebouncedValue";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { PerfHUD } from "@/components/PerfHUD";
 import {
@@ -45,7 +47,6 @@ import {
 import { Input } from "@/components/ui/input";
 import { LinearProgress } from "@/components/ui/linear-progress";
 import { useToast } from "@/components/ui/toast-provider";
-import { computeSelectionStats } from "@/lib/selection";
 import {
   createFilterPredicate,
   inferNumericColumns,
@@ -163,20 +164,20 @@ export function Sheet({
       })),
     [columns, widthOverrides],
   );
-  const persistWidthOverrides = useCallback(
-    (overrides: Record<string, number>) => {
-      if (typeof window === "undefined") return;
-      try {
-        window.localStorage.setItem(
-          "sheet.columns.widths",
-          JSON.stringify(overrides),
-        );
-      } catch (error) {
-        console.warn("Sheet: failed to persist column widths", error);
-      }
-    },
-    [],
-  );
+  const debouncedWidthOverrides = useDebouncedValue(widthOverrides, 300);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.setItem(
+        "sheet.columns.widths",
+        JSON.stringify(debouncedWidthOverrides),
+      );
+    } catch (error) {
+      console.warn("Sheet: failed to persist column widths", error);
+    }
+  }, [debouncedWidthOverrides]);
+
   const handleColumnsResize = useCallback(
     (next: typeof columns) => {
       const overrides: Record<string, number> = {};
@@ -184,9 +185,8 @@ export function Sheet({
         if (typeof c.width === "number") overrides[c.name] = c.width;
       }
       setWidthOverrides(overrides);
-      persistWidthOverrides(overrides);
     },
-    [persistWidthOverrides],
+    [],
   );
   const [selection, setSelection] = useState<Set<string>>(new Set());
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -376,31 +376,33 @@ export function Sheet({
     rows.length,
   ]);
 
-  const stats = useMemo(
-    () => computeSelectionStats(selection, rows),
-    [selection, rows],
-  );
-  const statNumberFormatter = useMemo(
-    () =>
-      new Intl.NumberFormat(undefined, {
-        maximumFractionDigits: 2,
-        minimumFractionDigits: 0,
-      }),
-    [],
-  );
-  const formatStatNumber = useCallback(
-    (value: number | null): string | null => {
-      if (value == null) return null;
-      if (!Number.isFinite(value)) return String(value);
-      return statNumberFormatter.format(value);
-    },
-    [statNumberFormatter],
+  const selectionCount = useMemo(() => selection.size, [selection]);
+  const activeFilterCount = useMemo(
+    () => Object.values(filters).filter((v) => v?.trim()).length,
+    [filters],
   );
   const numericColumns = useMemo(() => {
     if (colsState.length === 0 || rows.length === 0)
       return colsState.map(() => false);
     return inferNumericColumns(rows, colsState);
   }, [colsState, rows]);
+
+  const columnValues = useMemo(() => {
+    // Only compute for client-only mode (non-chunked)
+    if (isChunked || colsState.length === 0 || rows.length === 0) return [];
+
+    return colsState.map((_, colIndex) => {
+      const sampleSize = Math.min(100, rows.length); // Reduced from 500 to 100
+      const values: string[] = [];
+
+      for (let i = 0; i < sampleSize; i++) {
+        const value = rows[i]?.[colIndex];
+        if (value) values.push(value);
+      }
+
+      return values;
+    });
+  }, [colsState, rows, isChunked]);
   const filterPredicates = useMemo(() => {
     if (isChunked) return [];
     const entries: Array<{ colIndex: number; predicate: FilterPredicate }> = [];
@@ -611,7 +613,7 @@ export function Sheet({
             <input
               ref={fileInputRef}
               type="file"
-              accept=".csv,text/csv"
+              accept=".csv,.tsv,.xlsx,.xls,text/csv,text/tab-separated-values,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
               className="hidden"
               onChange={handleFileInputChange}
             />
@@ -642,22 +644,48 @@ export function Sheet({
           </div>
 
           <div className="flex items-center gap-2">
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  variant={showFilters ? "secondary" : "ghost"}
-                  size="icon-sm"
-                  onClick={() => setShowFilters((v) => !v)}
-                  aria-pressed={showFilters}
-                  aria-label={showFilters ? "Hide filters" : "Show filters"}
+            <div className="relative">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant={showFilters ? "secondary" : "ghost"}
+                    size="icon-sm"
+                    onClick={() => setShowFilters((v) => !v)}
+                    aria-pressed={showFilters}
+                    aria-label={showFilters ? "Hide filters" : "Show filters"}
+                  >
+                    <Filter className="h-4 w-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {showFilters ? "Hide filters" : "Show filters"}
+                </TooltipContent>
+              </Tooltip>
+              {activeFilterCount > 0 && (
+                <Badge
+                  variant="destructive"
+                  className="absolute -top-1 -right-1 h-4 min-w-4 px-1 text-[10px] leading-none flex items-center justify-center"
                 >
-                  <Filter className="h-4 w-4" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>
-                {showFilters ? "Hide filters" : "Show filters"}
-              </TooltipContent>
-            </Tooltip>
+                  {activeFilterCount}
+                </Badge>
+              )}
+            </div>
+
+            {activeFilterCount > 0 && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setFilters({})}
+                    className="h-7 px-2 text-xs"
+                  >
+                    Clear filters
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Clear all active filters</TooltipContent>
+              </Tooltip>
+            )}
 
             <Tooltip>
               <TooltipTrigger asChild>
@@ -755,22 +783,39 @@ export function Sheet({
           rows={viewRows}
           totalRows={rowCount}
           rowHeight={32}
-          filtersHeight={34}
+          filtersHeight={32}
           onRangeChange={isChunked ? handleVisibleRangeChange : undefined}
           filtersRow={
             showFilters && colsState.length > 0 ? (
               <>
                 {colsState.map((c, i) => (
-                  <Input
+                  <FilterInput
                     key={i}
                     id={`filter-input-${i}`}
                     placeholder={`Filter ${c.name}`}
-                    aria-label={`Filter ${c.name}`}
+                    ariaLabel={`Filter ${c.name}`}
                     value={filters[i] ?? ""}
-                    onChange={(e) =>
-                      setFilters((f) => ({ ...f, [i]: e.target.value }))
+                    onChange={(value) =>
+                      setFilters((f) => ({ ...f, [i]: value }))
                     }
-                    className="h-7 text-xs"
+                    columnValues={columnValues[i] ?? []}
+                    fetchDistinctValues={
+                      isChunked
+                        ? async () => {
+                            try {
+                              const response = await fetch(
+                                `/api/db/distinct-values?column=${encodeURIComponent(c.name)}&limit=100`
+                              );
+                              if (!response.ok) throw new Error("Failed to fetch distinct values");
+                              const data = await response.json();
+                              return data.values || [];
+                            } catch (error) {
+                              console.error("Error fetching distinct values:", error);
+                              return [];
+                            }
+                          }
+                        : undefined
+                    }
                   />
                 ))}
               </>
@@ -854,7 +899,7 @@ export function Sheet({
               <TooltipContent>Total columns</TooltipContent>
             </Tooltip>
 
-            {stats.count > 0 && (
+            {selectionCount > 0 && (
               <>
                 <Separator orientation="vertical" className="h-4" />
 
@@ -863,88 +908,14 @@ export function Sheet({
                     <div className="flex items-center gap-1.5">
                       <span className="text-muted-foreground">Selected:</span>
                       <Badge variant="secondary" className="font-mono">
-                        {stats.count}
+                        {selectionCount}
                       </Badge>
-                      <span className="text-muted-foreground text-[10px]">
-                        ({stats.rowsCount} × {stats.colsCount})
-                      </span>
                     </div>
                   </TooltipTrigger>
                   <TooltipContent>
-                    {stats.count} cells selected ({stats.rowsCount} rows ×{" "}
-                    {stats.colsCount} columns)
+                    {selectionCount} cells selected
                   </TooltipContent>
                 </Tooltip>
-              </>
-            )}
-
-            {stats.sum != null && (
-              <>
-                <Separator orientation="vertical" className="h-4" />
-
-                <div className="flex items-center gap-3">
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-muted-foreground">Sum:</span>
-                        <Badge variant="success" className="font-mono">
-                          {formatStatNumber(stats.sum)}
-                        </Badge>
-                      </div>
-                    </TooltipTrigger>
-                    <TooltipContent>
-                      Sum of selected numeric cells
-                    </TooltipContent>
-                  </Tooltip>
-
-                  {stats.avg != null && (
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-muted-foreground">Avg:</span>
-                          <Badge variant="success" className="font-mono">
-                            {formatStatNumber(stats.avg)}
-                          </Badge>
-                        </div>
-                      </TooltipTrigger>
-                      <TooltipContent>
-                        Average of selected numeric cells
-                      </TooltipContent>
-                    </Tooltip>
-                  )}
-
-                  {stats.min != null && (
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-muted-foreground">Min:</span>
-                          <Badge variant="outline" className="font-mono">
-                            {formatStatNumber(stats.min)}
-                          </Badge>
-                        </div>
-                      </TooltipTrigger>
-                      <TooltipContent>
-                        Minimum value in selection
-                      </TooltipContent>
-                    </Tooltip>
-                  )}
-
-                  {stats.max != null && (
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-muted-foreground">Max:</span>
-                          <Badge variant="outline" className="font-mono">
-                            {formatStatNumber(stats.max)}
-                          </Badge>
-                        </div>
-                      </TooltipTrigger>
-                      <TooltipContent>
-                        Maximum value in selection
-                      </TooltipContent>
-                    </Tooltip>
-                  )}
-                </div>
               </>
             )}
           </div>

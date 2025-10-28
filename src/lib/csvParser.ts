@@ -5,7 +5,35 @@ export interface ParsedCSV {
   rows: string[][];
 }
 
-export function parseCSV(text: string): ParsedCSV {
+export function detectDelimiter(text: string): "," | "\t" {
+  const lines = text.split(/\r?\n/).slice(0, 5);
+  let commaCount = 0;
+  let tabCount = 0;
+
+  for (const line of lines) {
+    if (!line.trim()) continue;
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const char = line[i];
+      const nextChar = line[i + 1];
+      if (char === '"') {
+        if (inQuotes && nextChar === '"') {
+          i++;
+        } else {
+          inQuotes = !inQuotes;
+        }
+      } else if (!inQuotes) {
+        if (char === ",") commaCount++;
+        else if (char === "\t") tabCount++;
+      }
+    }
+  }
+
+  return tabCount > commaCount ? "\t" : ",";
+}
+
+export function parseCSV(text: string, delimiter?: "," | "\t"): ParsedCSV {
+  const detectedDelimiter = delimiter ?? detectDelimiter(text);
   const lines = text.split(/\r?\n/);
   const rows: string[][] = [];
 
@@ -27,7 +55,7 @@ export function parseCSV(text: string): ParsedCSV {
         } else {
           inQuotes = !inQuotes;
         }
-      } else if (char === "," && !inQuotes) {
+      } else if (char === detectedDelimiter && !inQuotes) {
         row.push(current);
         current = "";
       } else {

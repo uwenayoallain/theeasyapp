@@ -30,13 +30,13 @@ export function useSheetKeyboardShortcuts({
       const mod = event.metaKey || event.ctrlKey;
       const key = event.key.toLowerCase();
 
-      if (mod && key === "f") {
+      if (mod && key === "f" && !event.shiftKey && !isTyping) {
         event.preventDefault();
         onSearchOpen();
         return;
       }
 
-      if (mod && key === "g") {
+      if (mod && key === "g" && !isTyping) {
         event.preventDefault();
         if (searchQuery.trim()) {
           if (event.shiftKey) onGoToPrevious();
@@ -63,7 +63,7 @@ export function useSheetKeyboardShortcuts({
         return;
       }
 
-      if (mod && event.shiftKey && key === "f") {
+      if (mod && event.shiftKey && key === "f" && !isTyping) {
         event.preventDefault();
         onToggleFilters();
         return;

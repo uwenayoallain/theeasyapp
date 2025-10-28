@@ -3,129 +3,83 @@ import { DEFAULT_DUCKDB_TABLE } from "@/constants/duckdb";
 import {
   getTableChunk,
   getTableColumns,
+  getDistinctValues,
   initDuckDB,
   loadCsvFromSource,
   runQuery,
   updateTableCells,
   type DuckDBCellUpdate,
 } from "@/lib/duckdb";
+import { sanitizeTableName } from "@/lib/duckdb-utils";
 import index from "./index.html";
 
-const tableNameRegex = /^[A-Za-z0-9_]+$/;
-const sanitizeTableName = (value: unknown): string =>
-  typeof value === "string" && tableNameRegex.test(value)
-    ? value
-    : DEFAULT_DUCKDB_TABLE;
+async function buildWorker(
+  workerName: "csv-worker" | "table-worker",
+  entrypoint: string,
+): Promise<Response> {
+  try {
+    if (process.env.NODE_ENV === "production") {
+      const matches = [
+        ...new Bun.Glob(`dist/workers/${workerName}*.js`).scanSync(
+          process.cwd(),
+        ),
+      ];
+      const prebuilt = matches.find(Boolean);
+      if (prebuilt) {
+        return new Response(Bun.file(prebuilt), {
+          headers: {
+            "Content-Type": "application/javascript; charset=utf-8",
+            "Cache-Control": "public, max-age=31536000, immutable",
+          },
+        });
+      }
+    }
+
+    const build = await Bun.build({
+      entrypoints: [entrypoint],
+      target: "browser",
+      format: "esm",
+      minify: process.env.NODE_ENV === "production",
+      sourcemap:
+        process.env.NODE_ENV === "production" ? "linked" : "inline",
+      splitting: false,
+    });
+    const out = build.outputs[0];
+    if (!out) {
+      throw new Error("Worker build produced no output");
+    }
+    const code = await out.text();
+    return new Response(code, {
+      headers: {
+        "Content-Type": "application/javascript; charset=utf-8",
+        "Cache-Control":
+          process.env.NODE_ENV === "production"
+            ? "public, max-age=31536000, immutable"
+            : "no-store",
+      },
+    });
+  } catch (err) {
+    console.error(`Failed to build ${workerName}:`, err);
+    return new Response("// Worker build error\n", {
+      status: 500,
+      headers: {
+        "Content-Type": "application/javascript; charset=utf-8",
+      },
+    });
+  }
+}
 
 const server = serve({
   port: 6969,
   routes: {
     "/workers/csv-worker.js": {
       async GET() {
-        try {
-          if (process.env.NODE_ENV === "production") {
-            const matches = [
-              ...new Bun.Glob("dist/workers/csv-worker*.js").scanSync(
-                process.cwd(),
-              ),
-            ];
-            const prebuilt = matches.find(Boolean);
-            if (prebuilt) {
-              return new Response(Bun.file(prebuilt), {
-                headers: {
-                  "Content-Type": "application/javascript; charset=utf-8",
-                  "Cache-Control": "public, max-age=31536000, immutable",
-                },
-              });
-            }
-          }
-
-          const build = await Bun.build({
-            entrypoints: ["./src/workers/csvWorker.ts"],
-            target: "browser",
-            format: "esm",
-            minify: process.env.NODE_ENV === "production",
-            sourcemap:
-              process.env.NODE_ENV === "production" ? "linked" : "inline",
-            splitting: false,
-          });
-          const out = build.outputs[0];
-          if (!out) {
-            throw new Error("Worker build produced no output");
-          }
-          const code = await out.text();
-          return new Response(code, {
-            headers: {
-              "Content-Type": "application/javascript; charset=utf-8",
-              "Cache-Control":
-                process.env.NODE_ENV === "production"
-                  ? "public, max-age=31536000, immutable"
-                  : "no-store",
-            },
-          });
-        } catch (err) {
-          console.error("Failed to build worker:", err);
-          return new Response("// Worker build error\n", {
-            status: 500,
-            headers: {
-              "Content-Type": "application/javascript; charset=utf-8",
-            },
-          });
-        }
+        return buildWorker("csv-worker", "./src/workers/csvWorker.ts");
       },
     },
     "/workers/table-worker.js": {
       async GET() {
-        try {
-          if (process.env.NODE_ENV === "production") {
-            const matches = [
-              ...new Bun.Glob("dist/workers/table-worker*.js").scanSync(
-                process.cwd(),
-              ),
-            ];
-            const prebuilt = matches.find(Boolean);
-            if (prebuilt) {
-              return new Response(Bun.file(prebuilt), {
-                headers: {
-                  "Content-Type": "application/javascript; charset=utf-8",
-                  "Cache-Control": "public, max-age=31536000, immutable",
-                },
-              });
-            }
-          }
-
-          const build = await Bun.build({
-            entrypoints: ["./src/workers/tableWorker.ts"],
-            target: "browser",
-            format: "esm",
-            minify: process.env.NODE_ENV === "production",
-            sourcemap:
-              process.env.NODE_ENV === "production" ? "linked" : "inline",
-            splitting: false,
-          });
-          const out = build.outputs[0];
-          if (!out) {
-            throw new Error("Worker build produced no output");
-          }
-          const code = await out.text();
-          return new Response(code, {
-            headers: {
-              "Content-Type": "application/javascript; charset=utf-8",
-              "Cache-Control":
-                process.env.NODE_ENV === "production"
-                  ? "public, max-age=31536000, immutable"
-                  : "no-store",
-            },
-          });
-        } catch (err) {
-          console.error("Failed to build table worker:", err);
-          return new Response("// Worker build error\n", {
-            status: 500,
-            headers: {
-              "Content-Type": "application/javascript; charset=utf-8",
-            },
-          });
-        }
+        return buildWorker("table-worker", "./src/workers/tableWorker.ts");
       },
     },
     "/data/sample.csv": {
@@ -297,6 +251,46 @@ const server = serve({
                 error instanceof Error
                   ? error.message
                   : "DuckDB preview failed",
+            },
+            { status: 500 },
+          );
+        }
+      },
+    },
+
+    "/api/db/distinct-values": {
+      async GET(request) {
+        try {
+          await initDuckDB();
+          const url = new URL(request.url);
+          const table = sanitizeTableName(url.searchParams.get("table"));
+          const column = url.searchParams.get("column");
+          const limitParam = Number.parseInt(
+            url.searchParams.get("limit") ?? "100",
+            10,
+          );
+
+          if (!column) {
+            return Response.json(
+              { error: "Column name is required" },
+              { status: 400 },
+            );
+          }
+
+          const limit = Number.isFinite(limitParam) && limitParam > 0
+            ? Math.min(limitParam, 1000)
+            : 100;
+
+          const values = await getDistinctValues(table, column, limit);
+          return Response.json({ values });
+        } catch (error) {
+          console.error("DuckDB distinct values error:", error);
+          return Response.json(
+            {
+              error:
+                error instanceof Error
+                  ? error.message
+                  : "Failed to get distinct values",
             },
             { status: 500 },
           );

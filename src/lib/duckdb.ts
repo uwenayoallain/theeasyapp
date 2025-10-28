@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url";
 import { isAbsolute, join } from "node:path";
 import { existsSync, mkdirSync } from "node:fs";
 import { unlink } from "node:fs/promises";
+import { buildWhereClause } from "./filterPredicateSQL";
+import { escapeIdentifier, escapeLiteral, isNumericType } from "./duckdb-utils";
 
 const DEFAULT_TABLE = DEFAULT_DUCKDB_TABLE;
 const SAMPLE_CSV = fileURLToPath(
@@ -11,6 +13,8 @@ const SAMPLE_CSV = fileURLToPath(
 );
 const DB_FILE = Bun.env.DUCKDB_DATABASE ?? ":memory:";
 const TEMP_DIR = Bun.env.DUCKDB_TMP_DIR ?? join(process.cwd(), ".duckdb-tmp");
+const DUCKDB_THREADS = Number(Bun.env.DUCKDB_THREADS || "4");
+const DUCKDB_MEMORY = Bun.env.DUCKDB_MEMORY || "1GB";
 
 const database = new Database(DB_FILE);
 const MAX_CHUNK_SIZE = 10000;
@@ -23,14 +27,6 @@ function ensureTempDir() {
   if (!existsSync(TEMP_DIR)) {
     mkdirSync(TEMP_DIR, { recursive: true });
   }
-}
-
-function escapeIdentifier(name: string): string {
-  return `"${name.replace(/"/g, '""')}"`;
-}
-
-function escapeLiteral(value: string): string {
-  return value.replace(/'/g, "''");
 }
 
 function getConnection(): Connection {
@@ -134,7 +130,15 @@ export async function loadCsvIntoTable(
 
 export async function initDuckDB(): Promise<void> {
   if (initPromise) return initPromise;
-  initPromise = loadCsvIntoTable(SAMPLE_CSV).catch((error) => {
+  initPromise = (async () => {
+    await enqueue(async (conn) => {
+      await run(conn, `SET threads TO ${DUCKDB_THREADS}`);
+      await run(conn, `SET memory_limit = '${DUCKDB_MEMORY}'`);
+      await run(conn, "SET enable_progress_bar = true");
+    });
+
+    await loadCsvIntoTable(SAMPLE_CSV);
+  })().catch((error) => {
     initPromise = null;
     throw error;
   });
@@ -154,6 +158,31 @@ export async function getTableColumns(
       name: row.name,
       type: row.type,
     }));
+  });
+}
+
+export async function getDistinctValues(
+  tableName: string = DEFAULT_TABLE,
+  columnName: string,
+  limit: number = 100,
+): Promise<string[]> {
+  const tableIdent = escapeIdentifier(tableName);
+  const columnIdent = escapeIdentifier(columnName);
+  const safeLimit = Math.min(Math.max(1, Math.floor(limit)), 1000);
+
+  return enqueue(async (conn) => {
+    // Get most frequent distinct values (useful for autocomplete)
+    const rows = await all<{ value: string }>(
+      conn,
+      `SELECT CAST(${columnIdent} AS VARCHAR) AS value, COUNT(*) AS freq
+       FROM ${tableIdent}
+       WHERE ${columnIdent} IS NOT NULL AND CAST(${columnIdent} AS VARCHAR) != ''
+       GROUP BY ${columnIdent}
+       ORDER BY freq DESC, value ASC
+       LIMIT ?`,
+      [safeLimit],
+    );
+    return rows.map((row) => row.value);
   });
 }
 
@@ -195,6 +224,7 @@ export async function getTableChunk(
       ? Math.min(Math.floor(limit), MAX_CHUNK_SIZE)
       : 2000;
   return enqueue(async (conn) => {
+    // Get column metadata (with types for numeric detection)
     const columnRows = await all<{ name: string; type: string }>(
       conn,
       `PRAGMA table_info(${tableIdent})`,
@@ -204,34 +234,21 @@ export async function getTableChunk(
       type: row.type,
     }));
 
-    let whereClause = "";
-    const params: unknown[] = [];
-    if (filters.length > 0) {
-      const conditions: string[] = [];
-      for (const filter of filters) {
-        const columnIdent = escapeIdentifier(filter.columnName);
-        const value = filter.value.trim();
-        if (!value) continue;
+    // Build WHERE clause using advanced filter predicate parser
+    const filterConditions = filters
+      .map((filter) => {
+        const column = columns.find((c) => c.name === filter.columnName);
+        return {
+          columnName: filter.columnName,
+          value: filter.value,
+          isNumeric: column ? isNumericType(column.type) : false,
+        };
+      })
+      .filter((f) => f.value.trim() !== "");
 
-        const lowerValue = value.toLowerCase();
-        if (lowerValue === "is:empty" || lowerValue === "is:null") {
-          conditions.push(`(${columnIdent} IS NULL OR ${columnIdent} = '')`);
-        } else if (lowerValue === "is:notempty" || lowerValue === "is:filled") {
-          conditions.push(
-            `(${columnIdent} IS NOT NULL AND ${columnIdent} != '')`,
-          );
-        } else {
-          conditions.push(
-            `LOWER(CAST(${columnIdent} AS VARCHAR)) LIKE LOWER(?)`,
-          );
-          params.push(`%${value}%`);
-        }
-      }
-      if (conditions.length > 0) {
-        whereClause = ` WHERE ${conditions.join(" AND ")}`;
-      }
-    }
+    const { sql: whereClause, params } = buildWhereClause(filterConditions);
 
+    // Build ORDER BY clause
     let orderByClause = "";
     if (sort) {
       const sortColumnIdent = escapeIdentifier(sort.columnName);
@@ -239,17 +256,28 @@ export async function getTableChunk(
       orderByClause = ` ORDER BY ${sortColumnIdent} ${direction}`;
     }
 
+    // OPTIMIZATION: Use COUNT() OVER() to get total count in same query
+    // This reduces two queries to one!
+    const columnsList = columns.map((c) => escapeIdentifier(c.name)).join(", ");
+    const sql = `
+      SELECT ${columnsList}, COUNT(*) OVER() as _total_count
+      FROM ${tableIdent}${whereClause}${orderByClause}
+      LIMIT ? OFFSET ?
+    `;
+
     const dataRows = await all<Record<string, unknown>>(
       conn,
-      `SELECT * FROM ${tableIdent}${whereClause}${orderByClause} LIMIT ? OFFSET ?`,
+      sql,
       [...params, safeLimit, safeOffset],
     );
-    const countRows = await all<{ count: number }>(
-      conn,
-      `SELECT COUNT(*) AS count FROM ${tableIdent}${whereClause}`,
-      params,
-    );
-    const rowCount = Number(countRows[0]?.count ?? 0);
+
+    // Extract total count from first row
+    const rowCount =
+      dataRows.length > 0
+        ? Number(dataRows[0]?._total_count ?? 0)
+        : 0;
+
+    // Convert rows to string arrays (remove _total_count)
     const rows = dataRows.map((row) =>
       columns.map(({ name }) => {
         const value = row[name];
@@ -258,6 +286,7 @@ export async function getTableChunk(
         return String(value);
       }),
     );
+
     return { columns, rows, rowCount, offset: safeOffset, limit: safeLimit };
   });
 }

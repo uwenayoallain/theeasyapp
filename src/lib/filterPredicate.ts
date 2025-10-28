@@ -1,3 +1,6 @@
+import { stripQuotes } from "./string-utils";
+import { parseNumber as sharedParseNumber } from "./validators";
+
 export type FilterPredicate = (value: unknown) => boolean;
 
 export interface PredicateOptions {
@@ -283,18 +286,6 @@ function buildContainsPredicate(raw: string): FilterPredicate {
   return (value) => asString(value).toLowerCase().includes(lower);
 }
 
-function stripQuotes(value: string): string {
-  if (!value) return "";
-  if (
-    (value.startsWith('"') && value.endsWith('"')) ||
-    (value.startsWith("'") && value.endsWith("'"))
-  ) {
-    const inner = value.slice(1, -1);
-    return inner.replace(/\\(["'\\])/g, "$1");
-  }
-  return value;
-}
-
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -308,10 +299,7 @@ function asString(value: unknown): string {
 }
 
 function parseNumber(value: string): number | null {
-  const normalized = value.replace(/[,_\s]/g, "");
-  if (!normalized) return null;
-  const num = Number(normalized);
-  return Number.isFinite(num) ? num : null;
+  return sharedParseNumber(value);
 }
 
 function truthy(value: unknown): boolean {
