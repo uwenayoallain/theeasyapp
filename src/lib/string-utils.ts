@@ -1,4 +1,7 @@
-export function caseInsensitiveIncludes(haystack: string, needle: string): boolean {
+export function caseInsensitiveIncludes(
+  haystack: string,
+  needle: string,
+): boolean {
   if (!haystack || !needle) return false;
   return haystack.toLowerCase().includes(needle.toLowerCase());
 }

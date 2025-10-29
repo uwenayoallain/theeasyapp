@@ -40,8 +40,7 @@ async function buildWorker(
       target: "browser",
       format: "esm",
       minify: process.env.NODE_ENV === "production",
-      sourcemap:
-        process.env.NODE_ENV === "production" ? "linked" : "inline",
+      sourcemap: process.env.NODE_ENV === "production" ? "linked" : "inline",
       splitting: false,
     });
     const out = build.outputs[0];
@@ -277,9 +276,10 @@ const server = serve({
             );
           }
 
-          const limit = Number.isFinite(limitParam) && limitParam > 0
-            ? Math.min(limitParam, 1000)
-            : 100;
+          const limit =
+            Number.isFinite(limitParam) && limitParam > 0
+              ? Math.min(limitParam, 1000)
+              : 100;
 
           const values = await getDistinctValues(table, column, limit);
           return Response.json({ values });

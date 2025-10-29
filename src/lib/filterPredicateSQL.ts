@@ -19,20 +19,29 @@ export function parseFilterToSQL(
 
   const lower = trimmed.toLowerCase();
   if (lower === "is:empty" || lower === "is:null") {
-    return { sql: `(${columnIdent} IS NULL OR ${columnIdent} = '')`, params: [] };
+    return {
+      sql: `(${columnIdent} IS NULL OR ${columnIdent} = '')`,
+      params: [],
+    };
   }
   if (lower === "is:notempty" || lower === "is:filled") {
-    return { sql: `(${columnIdent} IS NOT NULL AND ${columnIdent} != '')`, params: [] };
+    return {
+      sql: `(${columnIdent} IS NOT NULL AND ${columnIdent} != '')`,
+      params: [],
+    };
   }
 
-  const orParts = trimmed.split(/\s+or\s+|\|\|/i).map(s => s.trim()).filter(Boolean);
+  const orParts = trimmed
+    .split(/\s+or\s+|\|\|/i)
+    .map((s) => s.trim())
+    .filter(Boolean);
   if (orParts.length > 1) {
-    const orConditions = orParts.map(part => {
+    const orConditions = orParts.map((part) => {
       const subResult = parseFilterToSQL(columnName, part, isNumeric);
       return { sql: `(${subResult.sql})`, params: subResult.params };
     });
-    const sql = orConditions.map(c => c.sql).join(" OR ");
-    const params = orConditions.flatMap(c => c.params);
+    const sql = orConditions.map((c) => c.sql).join(" OR ");
+    const params = orConditions.flatMap((c) => c.params);
     return { sql: `(${sql})`, params };
   }
 
@@ -44,7 +53,10 @@ export function parseFilterToSQL(
         return { sql: `${columnIdent} != ?`, params: [num] };
       }
     }
-    return { sql: `LOWER(CAST(${columnIdent} AS VARCHAR)) NOT LIKE LOWER(?)`, params: [`%${value}%`] };
+    return {
+      sql: `LOWER(CAST(${columnIdent} AS VARCHAR)) NOT LIKE LOWER(?)`,
+      params: [`%${value}%`],
+    };
   }
 
   if (trimmed.startsWith("=") && trimmed.length > 1) {
@@ -94,21 +106,32 @@ export function parseFilterToSQL(
     }
   }
 
-  const rangeMatch = trimmed.match(/^(\d+(?:\.\d+)?)\s*(?:\.\.|to)\s*(\d+(?:\.\d+)?)$/i);
+  const rangeMatch = trimmed.match(
+    /^(\d+(?:\.\d+)?)\s*(?:\.\.|to)\s*(\d+(?:\.\d+)?)$/i,
+  );
   if (rangeMatch) {
     const min = parseFloat(rangeMatch[1]!);
     const max = parseFloat(rangeMatch[2]!);
     if (!isNaN(min) && !isNaN(max)) {
-      return { sql: `CAST(${columnIdent} AS DOUBLE) BETWEEN ? AND ?`, params: [min, max] };
+      return {
+        sql: `CAST(${columnIdent} AS DOUBLE) BETWEEN ? AND ?`,
+        params: [min, max],
+      };
     }
   }
 
   if (trimmed.includes("*") || trimmed.includes("?")) {
     const pattern = trimmed.replace(/\*/g, "%").replace(/\?/g, "_");
-    return { sql: `LOWER(CAST(${columnIdent} AS VARCHAR)) LIKE LOWER(?)`, params: [pattern] };
+    return {
+      sql: `LOWER(CAST(${columnIdent} AS VARCHAR)) LIKE LOWER(?)`,
+      params: [pattern],
+    };
   }
 
-  return { sql: `LOWER(CAST(${columnIdent} AS VARCHAR)) LIKE LOWER(?)`, params: [`%${trimmed}%`] };
+  return {
+    sql: `LOWER(CAST(${columnIdent} AS VARCHAR)) LIKE LOWER(?)`,
+    params: [`%${trimmed}%`],
+  };
 }
 
 export function buildWhereClause(

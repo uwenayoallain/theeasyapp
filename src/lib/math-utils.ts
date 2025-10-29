@@ -7,7 +7,10 @@ export function percentage(value: number, total: number): number | null {
   return Math.min(100, Math.round((value / total) * 100));
 }
 
-export function bounded(value: number, constraint: { min?: number; max?: number }): number {
+export function bounded(
+  value: number,
+  constraint: { min?: number; max?: number },
+): number {
   const { min = -Infinity, max = Infinity } = constraint;
   return clamp(value, min, max);
 }

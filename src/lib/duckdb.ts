@@ -265,17 +265,15 @@ export async function getTableChunk(
       LIMIT ? OFFSET ?
     `;
 
-    const dataRows = await all<Record<string, unknown>>(
-      conn,
-      sql,
-      [...params, safeLimit, safeOffset],
-    );
+    const dataRows = await all<Record<string, unknown>>(conn, sql, [
+      ...params,
+      safeLimit,
+      safeOffset,
+    ]);
 
     // Extract total count from first row
     const rowCount =
-      dataRows.length > 0
-        ? Number(dataRows[0]?._total_count ?? 0)
-        : 0;
+      dataRows.length > 0 ? Number(dataRows[0]?._total_count ?? 0) : 0;
 
     // Convert rows to string arrays (remove _total_count)
     const rows = dataRows.map((row) =>

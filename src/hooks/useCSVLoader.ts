@@ -31,7 +31,8 @@ function createWorker(path: string, fallbackName: string): Worker | null {
 }
 
 const csvWorkerFactory = () => createWorker("/workers/csv-worker.js", "CSV");
-const tableWorkerFactory = () => createWorker("/workers/table-worker.js", "DuckDB table");
+const tableWorkerFactory = () =>
+  createWorker("/workers/table-worker.js", "DuckDB table");
 
 type DuckDBSource = {
   type: "duckdb";
@@ -285,10 +286,7 @@ export function useCSVLoader() {
         ) {
           const ext = source.file.name.split(".").pop()?.toLowerCase();
           const isSupportedByExtension =
-            ext === "csv" ||
-            ext === "tsv" ||
-            ext === "xlsx" ||
-            ext === "xls";
+            ext === "csv" || ext === "tsv" || ext === "xlsx" || ext === "xls";
 
           if (!isSupportedByExtension) {
             setState({
@@ -371,7 +369,9 @@ export function useCSVLoader() {
         const table = sanitizeTableName(duckdbSource.table);
         duckdbTableRef.current = table;
         const datasetUrl =
-          typeof duckdbSource.url === "string" ? duckdbSource.url.trim() : undefined;
+          typeof duckdbSource.url === "string"
+            ? duckdbSource.url.trim()
+            : undefined;
         const file = duckdbSource.file;
         const chunkSize =
           duckdbSource.batchSize && duckdbSource.batchSize > 0
@@ -846,7 +846,9 @@ export function useCSVLoader() {
         }
         const endTime = performance.now();
         const fileType = file && isExcelFile(file.name) ? "Excel" : "CSV";
-        console.log(`${fileType} parsed in ${(endTime - startTime).toFixed(2)}ms`);
+        console.log(
+          `${fileType} parsed in ${(endTime - startTime).toFixed(2)}ms`,
+        );
         csvEvent("done", { ms: endTime - startTime });
         const loadedRowIndices = Array.from(
           { length: result.rows.length },

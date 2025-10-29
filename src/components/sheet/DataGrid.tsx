@@ -611,7 +611,13 @@ export function DataGrid({
         </div>
       )}
 
-      <div style={{ height: rowVirtual.getTotalSize(), position: "relative", minHeight: 0 }}>
+      <div
+        style={{
+          height: rowVirtual.getTotalSize(),
+          position: "relative",
+          minHeight: 0,
+        }}
+      >
         <Header
           columns={columns}
           onColumnsResize={onColumnsResize}

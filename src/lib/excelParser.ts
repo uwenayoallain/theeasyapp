@@ -39,9 +39,12 @@ export async function parseExcelFile(file: File): Promise<ParsedExcel> {
     const rows = data.slice(1);
     return { columns, rows };
   } catch (error) {
-    if (error instanceof Error && error.message.includes("Cannot find module")) {
+    if (
+      error instanceof Error &&
+      error.message.includes("Cannot find module")
+    ) {
       throw new Error(
-        "Excel support requires the 'xlsx' package. Please run: bun add xlsx"
+        "Excel support requires the 'xlsx' package. Please run: bun add xlsx",
       );
     }
     throw error;

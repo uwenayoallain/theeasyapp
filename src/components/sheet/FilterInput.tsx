@@ -1,4 +1,11 @@
-import {useState, useRef, useEffect, useMemo, useCallback, type KeyboardEvent} from "react";
+import {
+  useState,
+  useRef,
+  useEffect,
+  useMemo,
+  useCallback,
+  type KeyboardEvent,
+} from "react";
 import { Input } from "@/components/ui/input";
 import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -30,17 +37,22 @@ export function FilterInput({
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (showSuggestions && fetchDistinctValues && distinctValues.length === 0 && !isLoadingDistinct) {
+    if (
+      showSuggestions &&
+      fetchDistinctValues &&
+      distinctValues.length === 0 &&
+      !isLoadingDistinct
+    ) {
       let cancelled = false;
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setIsLoadingDistinct(true);
       fetchDistinctValues()
-        .then(values => {
+        .then((values) => {
           if (!cancelled) {
             setDistinctValues(values);
           }
         })
-        .catch(err => console.error("Failed to fetch distinct values:", err))
+        .catch((err) => console.error("Failed to fetch distinct values:", err))
         .finally(() => {
           if (!cancelled) {
             setIsLoadingDistinct(false);
@@ -51,26 +63,35 @@ export function FilterInput({
         cancelled = true;
       };
     }
-  }, [showSuggestions, fetchDistinctValues, distinctValues.length, isLoadingDistinct]);
+  }, [
+    showSuggestions,
+    fetchDistinctValues,
+    distinctValues.length,
+    isLoadingDistinct,
+  ]);
 
   const suggestions = useMemo(() => {
-    const sourceValues = distinctValues.length > 0 ? distinctValues : columnValues;
+    const sourceValues =
+      distinctValues.length > 0 ? distinctValues : columnValues;
 
     if (!value.trim() || sourceValues.length === 0) return [];
 
     const lowerQuery = value.toLowerCase();
     const filtered = sourceValues
-      .filter(val => val && val.toLowerCase().includes(lowerQuery))
+      .filter((val) => val && val.toLowerCase().includes(lowerQuery))
       .slice(0, 10);
 
     return filtered;
   }, [value, columnValues, distinctValues]);
 
-  const handleInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    onChange(e.target.value);
-    setShowSuggestions(true);
-    setSelectedIndex(-1);
-  }, [onChange]);
+  const handleInputChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      onChange(e.target.value);
+      setShowSuggestions(true);
+      setSelectedIndex(-1);
+    },
+    [onChange],
+  );
 
   const handleClear = useCallback(() => {
     onChange("");
@@ -78,37 +99,46 @@ export function FilterInput({
     inputRef.current?.focus();
   }, [onChange]);
 
-  const applySuggestion = useCallback((suggestion: string) => {
-    onChange(suggestion);
-    setShowSuggestions(false);
-    setSelectedIndex(-1);
-    inputRef.current?.focus();
-  }, [onChange]);
-
-  const handleKeyDown = useCallback((e: KeyboardEvent<HTMLInputElement>) => {
-    if (!showSuggestions || suggestions.length === 0) return;
-
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      setSelectedIndex(prev =>
-        prev < suggestions.length - 1 ? prev + 1 : prev
-      );
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setSelectedIndex(prev => prev > 0 ? prev - 1 : -1);
-    } else if (e.key === "Enter" && selectedIndex >= 0) {
-      e.preventDefault();
-      applySuggestion(suggestions[selectedIndex]!);
-    } else if (e.key === "Escape") {
-      e.preventDefault();
+  const applySuggestion = useCallback(
+    (suggestion: string) => {
+      onChange(suggestion);
       setShowSuggestions(false);
       setSelectedIndex(-1);
-    }
-  }, [showSuggestions, suggestions, selectedIndex, applySuggestion]);
+      inputRef.current?.focus();
+    },
+    [onChange],
+  );
+
+  const handleKeyDown = useCallback(
+    (e: KeyboardEvent<HTMLInputElement>) => {
+      if (!showSuggestions || suggestions.length === 0) return;
+
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setSelectedIndex((prev) =>
+          prev < suggestions.length - 1 ? prev + 1 : prev,
+        );
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setSelectedIndex((prev) => (prev > 0 ? prev - 1 : -1));
+      } else if (e.key === "Enter" && selectedIndex >= 0) {
+        e.preventDefault();
+        applySuggestion(suggestions[selectedIndex]!);
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        setShowSuggestions(false);
+        setSelectedIndex(-1);
+      }
+    },
+    [showSuggestions, suggestions, selectedIndex, applySuggestion],
+  );
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+      if (
+        containerRef.current &&
+        !containerRef.current.contains(event.target as Node)
+      ) {
         setShowSuggestions(false);
         setSelectedIndex(-1);
       }
@@ -116,7 +146,8 @@ export function FilterInput({
 
     if (showSuggestions) {
       document.addEventListener("mousedown", handleClickOutside);
-      return () => document.removeEventListener("mousedown", handleClickOutside);
+      return () =>
+        document.removeEventListener("mousedown", handleClickOutside);
     }
   }, [showSuggestions]);
 
@@ -154,7 +185,7 @@ export function FilterInput({
               type="button"
               className={cn(
                 "w-full text-left px-2 py-1.5 text-xs hover:bg-accent cursor-pointer",
-                selectedIndex === index && "bg-accent"
+                selectedIndex === index && "bg-accent",
               )}
               onMouseDown={(e) => {
                 e.preventDefault();

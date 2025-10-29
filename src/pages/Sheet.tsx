@@ -178,16 +178,13 @@ export function Sheet({
     }
   }, [debouncedWidthOverrides]);
 
-  const handleColumnsResize = useCallback(
-    (next: typeof columns) => {
-      const overrides: Record<string, number> = {};
-      for (const c of next) {
-        if (typeof c.width === "number") overrides[c.name] = c.width;
-      }
-      setWidthOverrides(overrides);
-    },
-    [],
-  );
+  const handleColumnsResize = useCallback((next: typeof columns) => {
+    const overrides: Record<string, number> = {};
+    for (const c of next) {
+      if (typeof c.width === "number") overrides[c.name] = c.width;
+    }
+    setWidthOverrides(overrides);
+  }, []);
   const [selection, setSelection] = useState<Set<string>>(new Set());
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [datasetUrl, setDatasetUrl] = useState(initialDatasetUrl);
@@ -804,13 +801,19 @@ export function Sheet({
                         ? async () => {
                             try {
                               const response = await fetch(
-                                `/api/db/distinct-values?column=${encodeURIComponent(c.name)}&limit=100`
+                                `/api/db/distinct-values?column=${encodeURIComponent(c.name)}&limit=100`,
                               );
-                              if (!response.ok) throw new Error("Failed to fetch distinct values");
+                              if (!response.ok)
+                                throw new Error(
+                                  "Failed to fetch distinct values",
+                                );
                               const data = await response.json();
                               return data.values || [];
                             } catch (error) {
-                              console.error("Error fetching distinct values:", error);
+                              console.error(
+                                "Error fetching distinct values:",
+                                error,
+                              );
                               return [];
                             }
                           }
