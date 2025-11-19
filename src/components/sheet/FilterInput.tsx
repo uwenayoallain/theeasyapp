@@ -9,6 +9,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { X } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { logger } from "@/lib/logger";
 
 interface FilterInputProps {
   value: string;
@@ -43,24 +44,30 @@ export function FilterInput({
       distinctValues.length === 0 &&
       !isLoadingDistinct
     ) {
-      let cancelled = false;
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setIsLoadingDistinct(true);
-      fetchDistinctValues()
-        .then((values) => {
-          if (!cancelled) {
+      const controller = new AbortController();
+
+      const loadDistinctValues = async () => {
+        setIsLoadingDistinct(true);
+        try {
+          const values = await fetchDistinctValues();
+          if (!controller.signal.aborted) {
             setDistinctValues(values);
           }
-        })
-        .catch((err) => console.error("Failed to fetch distinct values:", err))
-        .finally(() => {
-          if (!cancelled) {
+        } catch (err) {
+          if (!controller.signal.aborted) {
+            logger.error("Failed to fetch distinct values:", err);
+          }
+        } finally {
+          if (!controller.signal.aborted) {
             setIsLoadingDistinct(false);
           }
-        });
+        }
+      };
+
+      loadDistinctValues();
 
       return () => {
-        cancelled = true;
+        controller.abort();
       };
     }
   }, [

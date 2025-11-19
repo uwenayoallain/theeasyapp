@@ -1,3 +1,5 @@
+import { logger } from "@/lib/logger";
+
 export type PerfEvent =
   | {
       type: "commit";
@@ -26,12 +28,12 @@ export function isPerfEnabled(): boolean {
     const q = new URLSearchParams(window.location.search);
     if (q.get("perf") === "1") return true;
   } catch (error) {
-    console.warn("Perf: failed to read perf= query flag", error);
+    logger.warn("Perf: failed to read perf= query flag", error);
   }
   try {
     return localStorage.getItem("dev.perf") === "1";
   } catch (error) {
-    console.warn("Perf: failed to read dev.perf flag from localStorage", error);
+    logger.warn("Perf: failed to read dev.perf flag from localStorage", error);
   }
   return false;
 }
@@ -47,11 +49,12 @@ function emit(ev: PerfEvent) {
   if (!isPerfEnabled()) return;
   for (const l of listeners) l(ev);
   if (ev.type === "commit") {
-    // eslint-disable-next-line no-console
-    console.debug(
-      `[perf] ${ev.component} commit: ${ev.ms.toFixed(2)}ms`,
-      ev.extra ?? "",
-    );
+    if (process.env.NODE_ENV !== "production") {
+      logger.debug(
+        `[perf] ${ev.component} commit: ${ev.ms.toFixed(2)}ms`,
+        ev.extra ?? "",
+      );
+    }
   }
 }
 
@@ -60,7 +63,7 @@ export function mark(name: string) {
   try {
     performance.mark(name);
   } catch (error) {
-    console.warn("Perf: performance.mark unavailable", error);
+    logger.warn("Perf: performance.mark unavailable", error);
   }
 }
 
@@ -98,6 +101,7 @@ export function csvEvent(
   if (!isPerfEnabled()) return;
   const event: CsvPerfEvent = { type: "csv", phase, ...(info ?? {}) };
   emit(event);
-  // eslint-disable-next-line no-console
-  console.debug(`[perf] csv:${phase}`, info ?? "");
+  if (process.env.NODE_ENV !== "production") {
+    logger.debug(`[perf] csv:${phase}`, info ?? "");
+  }
 }

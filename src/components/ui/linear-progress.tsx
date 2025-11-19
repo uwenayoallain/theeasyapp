@@ -13,13 +13,13 @@ export function LinearProgress({
   return (
     <div
       className={cn(
-        "relative block h-[3px] w-full overflow-hidden rounded-full bg-muted",
+        "relative block h-1 w-full overflow-hidden rounded-full bg-border/30",
         className,
       )}
     >
       <div
         className={cn(
-          "absolute left-0 top-0 h-full bg-primary transition-all duration-200",
+          "absolute left-0 top-0 h-full bg-primary/80 transition-all duration-300 ease-out rounded-full",
           clamped == null ? "linear-progress-indeterminate w-1/3" : "",
         )}
         style={clamped == null ? undefined : { width: `${clamped}%` }}

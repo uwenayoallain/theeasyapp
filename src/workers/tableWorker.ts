@@ -1,4 +1,12 @@
 /* eslint-disable no-restricted-globals */
+import { logger } from "@/lib/logger";
+
+type DuckDBWorkerContext = typeof globalThis & {
+  DUCKDB_WORKER_CACHE_SIZE?: number | string;
+};
+
+declare const self: DuckDBWorkerContext;
+
 interface ColumnMeta {
   name: string;
   type: string;
@@ -48,6 +56,11 @@ type ReadyMessage = {
 
 type ErrorMessage = { type: "error"; requestId?: number; message: string };
 
+interface ChunkMetadata {
+  accessCount: number;
+  lastAccess: number;
+}
+
 interface WorkerState {
   table: string;
   chunkSize: number;
@@ -55,13 +68,15 @@ interface WorkerState {
   rowCount: number;
   chunks: Map<number, string[][]>;
   chunkAccessOrder: number[];
+  chunkMetadata: Map<number, ChunkMetadata>;
+  chunkETags: Map<number, string>;
   inflight: Map<number, Promise<void>>;
   controller: AbortController | null;
   filters: Record<number, string>;
   sort: { colIndex: number; dir: string } | null;
 }
 
-const MAX_CACHED_CHUNKS = 50;
+const MAX_CACHED_CHUNKS = Number(self.DUCKDB_WORKER_CACHE_SIZE ?? "50");
 
 const state: WorkerState = {
   table: "dataset",
@@ -70,6 +85,8 @@ const state: WorkerState = {
   rowCount: 0,
   chunks: new Map(),
   chunkAccessOrder: [],
+  chunkMetadata: new Map(),
+  chunkETags: new Map(),
   inflight: new Map(),
   controller: null,
   filters: {},
@@ -85,7 +102,7 @@ const abortCurrent = () => {
     try {
       state.controller.abort();
     } catch (error) {
-      console.warn("tableWorker: abort controller failure", error);
+      logger.warn("tableWorker: abort controller failure", error);
     }
   }
   state.controller = new AbortController();
@@ -97,6 +114,14 @@ const trackChunkAccess = (chunkIndex: number) => {
     state.chunkAccessOrder.splice(existingIndex, 1);
   }
   state.chunkAccessOrder.push(chunkIndex);
+
+  const metadata = state.chunkMetadata.get(chunkIndex) ?? {
+    accessCount: 0,
+    lastAccess: 0,
+  };
+  metadata.accessCount++;
+  metadata.lastAccess = Date.now();
+  state.chunkMetadata.set(chunkIndex, metadata);
 };
 
 const evictOldChunks = () => {
@@ -104,9 +129,37 @@ const evictOldChunks = () => {
     state.chunks.size >= MAX_CACHED_CHUNKS &&
     state.chunkAccessOrder.length > 0
   ) {
-    const oldestChunk = state.chunkAccessOrder.shift();
+    let oldestChunk: number | undefined;
+    let lowestScore = Infinity;
+
+    for (const chunkIndex of state.chunkAccessOrder) {
+      const metadata = state.chunkMetadata.get(chunkIndex);
+      if (!metadata) continue;
+
+      const age = Date.now() - metadata.lastAccess;
+      const score = metadata.accessCount * 1000 - age;
+
+      if (score < lowestScore) {
+        lowestScore = score;
+        oldestChunk = chunkIndex;
+      }
+    }
+
     if (oldestChunk !== undefined) {
       state.chunks.delete(oldestChunk);
+      state.chunkMetadata.delete(oldestChunk);
+      state.chunkETags.delete(oldestChunk);
+      const idx = state.chunkAccessOrder.indexOf(oldestChunk);
+      if (idx !== -1) {
+        state.chunkAccessOrder.splice(idx, 1);
+      }
+    } else {
+      const fallbackChunk = state.chunkAccessOrder.shift();
+      if (fallbackChunk !== undefined) {
+        state.chunks.delete(fallbackChunk);
+        state.chunkMetadata.delete(fallbackChunk);
+        state.chunkETags.delete(fallbackChunk);
+      }
     }
   }
 };
@@ -149,12 +202,33 @@ const fetchChunk = async (index: number): Promise<void> => {
     params.set("sort", JSON.stringify(state.sort));
   }
 
+  const headers: Record<string, string> = {};
+  const cachedChunk = state.chunks.get(index);
+  if (cachedChunk) {
+    const etag = state.chunkETags.get(index);
+    if (etag) {
+      headers["If-None-Match"] = etag;
+    }
+  }
+
   const response = await fetch(`/api/db/preview?${params.toString()}`, {
     signal: controller.signal,
+    headers,
   });
+
+  if (response.status === 304) {
+    trackChunkAccess(index);
+    return;
+  }
+
   if (!response.ok) {
     const detail = await response.text().catch(() => "");
     throw new Error(detail || `Preview failed (${response.status})`);
+  }
+
+  const etag = response.headers.get("etag");
+  if (etag) {
+    state.chunkETags.set(index, etag);
   }
   const payload = (await response.json()) as {
     columns?: ColumnMeta[];
@@ -218,6 +292,8 @@ const handleInit = (message: InitMessage) => {
   if (filtersChanged || sortChanged) {
     state.chunks.clear();
     state.chunkAccessOrder = [];
+    state.chunkMetadata.clear();
+    state.chunkETags.clear();
     state.inflight.clear();
     abortCurrent();
   }
@@ -293,6 +369,8 @@ self.addEventListener("message", (event: MessageEvent<IncomingMessage>) => {
     case "reset":
       state.chunks.clear();
       state.chunkAccessOrder = [];
+      state.chunkMetadata.clear();
+      state.chunkETags.clear();
       state.inflight.clear();
       abortCurrent();
       break;

@@ -40,8 +40,9 @@ const Kbd = React.forwardRef<HTMLElement, KbdProps>(
       return (
         <span className="inline-flex items-center gap-1" ref={ref}>
           {keys.map((key, index) => (
-            <React.Fragment key={index}>
+            <>
               <kbd
+                key={index}
                 className={cn(kbdVariants({ variant, size, className }))}
                 aria-label={key}
                 {...props}
@@ -53,7 +54,7 @@ const Kbd = React.forwardRef<HTMLElement, KbdProps>(
                   {separator}
                 </span>
               )}
-            </React.Fragment>
+            </>
           ))}
         </span>
       );

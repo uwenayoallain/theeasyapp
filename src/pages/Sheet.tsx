@@ -4,28 +4,25 @@ import {
   useMemo,
   useRef,
   useState,
-  type ChangeEvent,
   type FormEvent,
 } from "react";
 import { DataGrid } from "@/components/sheet/DataGrid";
 import { SearchOverlay } from "@/components/sheet/SearchOverlay";
 import { ShortcutsHelp } from "@/components/sheet/ShortcutsHelp";
-import { FilterInput } from "@/components/sheet/FilterInput";
 import { useCSVLoader, type CSVLoaderState } from "@/hooks/useCSVLoader";
 import { useSheetSort } from "@/hooks/useSheetSort";
-import { useSheetFilters } from "@/hooks/useSheetFilters";
 import { useSheetSearch } from "@/hooks/useSheetSearch";
 import { useSheetKeyboardShortcuts } from "@/hooks/useSheetKeyboardShortcuts";
 import { useDebouncedValue } from "@/lib/useDebouncedValue";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { PerfHUD } from "@/components/PerfHUD";
 import {
-  Filter,
-  Upload,
   Search,
   HelpCircle,
   Download,
   FileText,
+  Undo2,
+  Redo2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -45,13 +42,10 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
-import { LinearProgress } from "@/components/ui/linear-progress";
 import { useToast } from "@/components/ui/toast-provider";
-import {
-  createFilterPredicate,
-  inferNumericColumns,
-  type FilterPredicate,
-} from "@/lib/filterPredicate";
+import { logger } from "@/lib/logger";
+import { LoadingBanner } from "@/components/ui/loading-banner";
+// Filters are disabled for now
 
 const formatBytes = (bytes: number) => {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
@@ -89,19 +83,15 @@ const formatProgress = (progress: CSVLoaderState["progress"]) => {
 export function Sheet({
   initialUrl,
   initialSortParam,
-  initialFiltersParam,
   initialQueryParam,
   onSearchChange,
+  autoLoadDefault = false,
 }: {
   initialUrl?: string;
   initialSortParam?: string;
-  initialFiltersParam?: string;
   initialQueryParam?: string;
-  onSearchChange?: (next: {
-    sort?: string | null;
-    filters?: string | null;
-    q?: string | null;
-  }) => void;
+  onSearchChange?: (next: { sort?: string | null; q?: string | null }) => void;
+  autoLoadDefault?: boolean;
 }) {
   const {
     columns,
@@ -114,6 +104,12 @@ export function Sheet({
     updateCell,
     applyPaste,
     clearCells,
+    undo,
+    redo,
+    canUndo,
+    canRedo,
+    isSaving,
+    savingCount,
     error,
     isLoading,
     progress,
@@ -130,7 +126,9 @@ export function Sheet({
         try {
           return decodeURIComponent(encoded);
         } catch (error) {
-          console.warn("Sheet: failed to decode initial DuckDB URL", error);
+          if (process.env.NODE_ENV !== "production") {
+            logger.warn("Sheet: failed to decode initial DuckDB URL", error);
+          }
           return "";
         }
       }
@@ -151,7 +149,9 @@ export function Sheet({
           ),
         );
       } catch (error) {
-        console.warn("Sheet: failed to restore column widths", error);
+        if (process.env.NODE_ENV !== "production") {
+          logger.warn("Sheet: failed to restore column widths", error);
+        }
         return {};
       }
     },
@@ -174,7 +174,9 @@ export function Sheet({
         JSON.stringify(debouncedWidthOverrides),
       );
     } catch (error) {
-      console.warn("Sheet: failed to persist column widths", error);
+      if (process.env.NODE_ENV !== "production") {
+        logger.warn("Sheet: failed to persist column widths", error);
+      }
     }
   }, [debouncedWidthOverrides]);
 
@@ -186,7 +188,7 @@ export function Sheet({
     setWidthOverrides(overrides);
   }, []);
   const [selection, setSelection] = useState<Set<string>>(new Set());
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  // Upload UI removed; keep URL loader only
   const [datasetUrl, setDatasetUrl] = useState(initialDatasetUrl);
 
   const updateUrlParam = (value: string | null) => {
@@ -197,29 +199,11 @@ export function Sheet({
       else url.searchParams.delete("url");
       window.history.replaceState(null, "", url.toString());
     } catch (error) {
-      console.warn("Sheet: failed to update url search param", error);
+      logger.warn("Sheet: failed to update url search param", error);
     }
   };
 
-  const triggerFilePicker = useCallback(() => {
-    fileInputRef.current?.click();
-  }, []);
-
-  const handleFileInputChange = useCallback(
-    async (event: ChangeEvent<HTMLInputElement>) => {
-      const file = event.target.files?.[0] ?? null;
-      event.target.value = "";
-      if (!file) return;
-      try {
-        await loadSource({ type: "duckdb", file });
-        setDatasetUrl("");
-        updateUrlParam(null);
-      } catch (err) {
-        console.error("Failed to load CSV file into DuckDB:", err);
-      }
-    },
-    [loadSource],
-  );
+  // File upload handlers removed
 
   const handleLoadUrlSubmit = useCallback(
     async (event: FormEvent<HTMLFormElement>) => {
@@ -231,21 +215,13 @@ export function Sheet({
         setDatasetUrl(trimmed);
         updateUrlParam(`duckdb:url=${encodeURIComponent(trimmed)}`);
       } catch (err) {
-        console.error("Failed to load remote CSV into DuckDB:", err);
+        logger.error("Failed to load remote CSV into DuckDB:", err);
       }
     },
     [datasetUrl, loadSource],
   );
 
-  const handleLoadSample = useCallback(async () => {
-    try {
-      await loadSource({ type: "duckdb" });
-      setDatasetUrl("");
-      updateUrlParam("duckdb:dataset");
-    } catch (err) {
-      console.error("Failed to load sample dataset:", err);
-    }
-  }, [loadSource]);
+  // Sample dataset loader removed
 
   const handleVisibleRangeChange = useCallback(
     ({ startIndex, endIndex }: { startIndex: number; endIndex: number }) => {
@@ -263,7 +239,7 @@ export function Sheet({
       if (allLoaded) return;
 
       void ensureRange(rangeStart, rangeEnd).catch((err) => {
-        console.error("Failed to fetch DuckDB chunk:", err);
+        logger.error("Failed to fetch DuckDB chunk:", err);
       });
     },
     [ensureRange, loadedRowIndices, isChunked],
@@ -289,7 +265,7 @@ export function Sheet({
                   return;
                 }
               } catch (error) {
-                console.warn("Sheet: failed to decode duckdb:url spec", error);
+                logger.warn("Sheet: failed to decode duckdb:url spec", error);
               }
             } else if (spec.startsWith("table=")) {
               const tableName = spec.slice(6) || undefined;
@@ -305,122 +281,43 @@ export function Sheet({
             return;
           }
         }
-        await loadSource({ type: "duckdb" });
+        if (autoLoadDefault) {
+          await loadSource({ type: "duckdb" });
+        }
       } catch (error) {
-        console.error("Sheet: initial load failed", error);
+        logger.error("Sheet: initial load failed", error);
       }
     };
 
     void runInitialLoad();
-  }, [initialUrl, loadSource]);
+  }, [initialUrl, loadSource, autoLoadDefault]);
 
   const { sort, toggleSort } = useSheetSort({
     initialSortParam,
     onSearchChange,
   });
-
-  const { filters, setFilters, debouncedFilters, showFilters, setShowFilters } =
-    useSheetFilters({
-      initialFiltersParam,
-      onSearchChange,
-    });
-
-  const prevFiltersRef = useRef<Record<number, string>>({});
+  // Filters disabled
   const prevSortRef = useRef<{ colIndex: number; dir: "asc" | "desc" } | null>(
     null,
   );
-  const hasAppliedInitialFiltersRef = useRef(false);
   const [filterSortKey, setFilterSortKey] = useState(0);
 
   useEffect(() => {
     if (!isChunked || !setFiltersAndSort || isLoading) return;
-
-    if (!hasAppliedInitialFiltersRef.current && rows.length === 0) {
-      hasAppliedInitialFiltersRef.current = true;
-      prevFiltersRef.current = debouncedFilters;
+    if (rows.length === 0) {
       prevSortRef.current = sort;
       return;
     }
-
-    const filtersChanged =
-      JSON.stringify(prevFiltersRef.current) !==
-      JSON.stringify(debouncedFilters);
     const sortChanged =
       JSON.stringify(prevSortRef.current) !== JSON.stringify(sort);
-
-    if (!filtersChanged && !sortChanged) return;
-
-    prevFiltersRef.current = debouncedFilters;
+    if (!sortChanged) return;
     prevSortRef.current = sort;
-
-    void setFiltersAndSort(
-      debouncedFilters,
-      sort
-        ? {
-            colIndex: sort.colIndex,
-            dir: sort.dir,
-          }
-        : undefined,
-    ).then(() => {
+    void setFiltersAndSort({}, sort ?? undefined).then(() => {
       setFilterSortKey((k) => k + 1);
     });
-  }, [
-    isChunked,
-    debouncedFilters,
-    sort,
-    setFiltersAndSort,
-    isLoading,
-    rows.length,
-  ]);
+  }, [isChunked, sort, setFiltersAndSort, isLoading, rows.length]);
 
   const selectionCount = useMemo(() => selection.size, [selection]);
-  const activeFilterCount = useMemo(
-    () => Object.values(filters).filter((v) => v?.trim()).length,
-    [filters],
-  );
-  const numericColumns = useMemo(() => {
-    if (colsState.length === 0 || rows.length === 0)
-      return colsState.map(() => false);
-    return inferNumericColumns(rows, colsState);
-  }, [colsState, rows]);
-
-  const columnValues = useMemo(() => {
-    // Only compute for client-only mode (non-chunked)
-    if (isChunked || colsState.length === 0 || rows.length === 0) return [];
-
-    return colsState.map((_, colIndex) => {
-      const sampleSize = Math.min(100, rows.length); // Reduced from 500 to 100
-      const values: string[] = [];
-
-      for (let i = 0; i < sampleSize; i++) {
-        const value = rows[i]?.[colIndex];
-        if (value) values.push(value);
-      }
-
-      return values;
-    });
-  }, [colsState, rows, isChunked]);
-  const filterPredicates = useMemo(() => {
-    if (isChunked) return [];
-    const entries: Array<{ colIndex: number; predicate: FilterPredicate }> = [];
-    for (const [key, raw] of Object.entries(debouncedFilters)) {
-      if (typeof raw !== "string" || raw.trim().length === 0) continue;
-      const colIndex = Number(key);
-      if (
-        !Number.isInteger(colIndex) ||
-        colIndex < 0 ||
-        colIndex >= colsState.length
-      )
-        continue;
-      entries.push({
-        colIndex,
-        predicate: createFilterPredicate(raw, {
-          isNumeric: numericColumns[colIndex] ?? false,
-        }),
-      });
-    }
-    return entries;
-  }, [debouncedFilters, colsState, numericColumns, isChunked]);
 
   const cancelRequestedRef = useRef(false);
   const wasLoadingRef = useRef(false);
@@ -428,17 +325,7 @@ export function Sheet({
 
   const viewIndices = useMemo(() => {
     if (isChunked) return null;
-    let idx = Array.from({ length: rows.length }, (_, i) => i);
-    if (filterPredicates.length > 0) {
-      idx = idx.filter((i) => {
-        const row = rows[i];
-        for (const { colIndex, predicate } of filterPredicates) {
-          const cell = row?.[colIndex];
-          if (!predicate(cell ?? "")) return false;
-        }
-        return true;
-      });
-    }
+    const idx = Array.from({ length: rows.length }, (_, i) => i);
     if (!sort) return idx;
     const { colIndex, dir } = sort;
     const isNumeric = idx
@@ -460,7 +347,7 @@ export function Sheet({
       return va.localeCompare(vb) * (dir === "asc" ? 1 : -1);
     };
     return idx.sort(cmp);
-  }, [rows, sort, filterPredicates, isChunked]);
+  }, [rows, sort, isChunked]);
 
   const viewRows = useMemo(() => {
     if (!viewIndices) return rows;
@@ -503,8 +390,9 @@ export function Sheet({
     onSearchOpen: () => setSearchOpen(true),
     onGoToNext: goToNextMatch,
     onGoToPrevious: goToPreviousMatch,
-    onToggleFilters: () => setShowFilters((v) => !v),
     onToggleHelp: () => setShortcutsOpen((o) => !o),
+    onUndo: undo,
+    onRedo: redo,
   });
 
   const percentLoaded =
@@ -513,8 +401,9 @@ export function Sheet({
       : null;
   const progressSummary = formatProgress(progress) ?? "";
   const showLoadingBanner =
-    isLoading ||
+    (isLoading && rows.length === 0) ||
     (!isChunked &&
+      rows.length === 0 &&
       typeof progress.total === "number" &&
       progress.total > 0 &&
       progress.loaded < progress.total);
@@ -576,11 +465,13 @@ export function Sheet({
   return (
     <div className="flex flex-col h-screen">
       <TooltipProvider>
-        <div className="border-b bg-card/50 backdrop-blur supports-[backdrop-filter]:bg-card/50 px-4 py-2.5 flex flex-wrap items-center justify-between gap-4">
-          <div className="flex flex-wrap items-center gap-3">
-            <div className="flex items-center gap-2">
-              <FileText className="h-5 w-5 text-primary" />
-              <span className="text-sm font-semibold">Sheet</span>
+        <div className="border-b border-border/50 bg-background/80 backdrop-blur-md px-4 sm:px-6 py-3 sm:py-4 flex flex-wrap items-center justify-between gap-4 sm:gap-6">
+          <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+            <div className="flex items-center gap-3">
+              <FileText className="h-5 w-5 text-muted-foreground" />
+              <span className="text-lg font-semibold tracking-tight">
+                Data Explorer
+              </span>
             </div>
 
             <Separator orientation="vertical" className="h-6" />
@@ -593,7 +484,7 @@ export function Sheet({
                 value={datasetUrl}
                 onChange={(event) => setDatasetUrl(event.target.value)}
                 placeholder="https://example.com/data.csv"
-                className="w-48 sm:w-64"
+                className="w-40 sm:w-48 md:w-64"
                 aria-label="Load CSV from URL"
                 disabled={isLoading}
               />
@@ -606,83 +497,59 @@ export function Sheet({
                 Load URL
               </Button>
             </form>
-
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".csv,.tsv,.xlsx,.xls,text/csv,text/tab-separated-values,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-              className="hidden"
-              onChange={handleFileInputChange}
-            />
-
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={triggerFilePicker}
-                  disabled={isLoading}
-                >
-                  <Upload className="h-4 w-4" />
-                  <span className="hidden sm:inline">Upload</span>
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>Upload CSV file</TooltipContent>
-            </Tooltip>
-
-            <Button
-              size="sm"
-              variant="ghost"
-              onClick={handleLoadSample}
-              disabled={isLoading}
-            >
-              Load Sample
-            </Button>
+            {/* Upload and Load Sample actions removed */}
           </div>
 
           <div className="flex items-center gap-2">
-            <div className="relative">
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant={showFilters ? "secondary" : "ghost"}
-                    size="icon-sm"
-                    onClick={() => setShowFilters((v) => !v)}
-                    aria-pressed={showFilters}
-                    aria-label={showFilters ? "Hide filters" : "Show filters"}
-                  >
-                    <Filter className="h-4 w-4" />
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>
-                  {showFilters ? "Hide filters" : "Show filters"}
-                </TooltipContent>
-              </Tooltip>
-              {activeFilterCount > 0 && (
-                <Badge
-                  variant="destructive"
-                  className="absolute -top-1 -right-1 h-4 min-w-4 px-1 text-[10px] leading-none flex items-center justify-center"
-                >
-                  {activeFilterCount}
-                </Badge>
+            {/* Filters UI removed */}
+
+            {/* Saving status */}
+            <div className="hidden sm:flex items-center gap-2 text-xs text-muted-foreground">
+              {isSaving ? (
+                <>
+                  <span className="inline-flex h-2 w-2 rounded-full border border-primary border-t-transparent animate-spin" />
+                  <span>
+                    Saving{savingCount > 1 ? ` (${savingCount})` : ""}…
+                  </span>
+                </>
+              ) : (
+                <span className="text-muted-foreground/80">
+                  All changes saved
+                </span>
               )}
             </div>
 
-            {activeFilterCount > 0 && (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => setFilters({})}
-                    className="h-7 px-2 text-xs"
-                  >
-                    Clear filters
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>Clear all active filters</TooltipContent>
-              </Tooltip>
-            )}
+            {/* Undo/Redo */}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={() => undo()}
+                  disabled={!canUndo}
+                  aria-label="Undo"
+                >
+                  <Undo2 className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>Undo (Ctrl/Cmd+Z)</TooltipContent>
+            </Tooltip>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon-sm"
+                  onClick={() => redo()}
+                  disabled={!canRedo}
+                  aria-label="Redo"
+                >
+                  <Redo2 className="h-4 w-4" />
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>
+                Redo (Ctrl/Cmd+Shift+Z or Ctrl/Cmd+Y)
+              </TooltipContent>
+            </Tooltip>
 
             <Tooltip>
               <TooltipTrigger asChild>
@@ -747,30 +614,14 @@ export function Sheet({
         </div>
       </TooltipProvider>
       {showLoadingBanner && (
-        <div
-          className="border-b bg-muted/50 px-3 py-2 text-xs text-muted-foreground"
-          role="status"
-          aria-live="polite"
-        >
-          <div className="flex items-center gap-3">
-            <span className="font-medium text-foreground">
-              Loading dataset…
-            </span>
-            {progressSummary && (
-              <div className="hidden sm:block text-[11px] text-muted-foreground/80 whitespace-nowrap">
-                {progressSummary}
-              </div>
-            )}
-            <div className="flex-1" />
-            {isLoading && (
-              <Button size="sm" variant="ghost" onClick={handleCancelLoad}>
-                Cancel
-              </Button>
-            )}
-          </div>
-          <div className="mt-2 -mx-3">
-            <LinearProgress value={percentLoaded} />
-          </div>
+        <div className="pointer-events-none fixed inset-x-0 top-[72px] z-40 flex justify-center px-3 sm:px-6">
+          <LoadingBanner
+            title="Loading dataset"
+            description={progressSummary || null}
+            progress={percentLoaded}
+            onCancel={isLoading ? handleCancelLoad : undefined}
+            className="pointer-events-auto w-full max-w-2xl rounded-xl border border-border/70 bg-background/95 shadow-lg shadow-black/10 backdrop-blur"
+          />
         </div>
       )}
       <div className="flex-1 min-h-0">
@@ -780,50 +631,7 @@ export function Sheet({
           rows={viewRows}
           totalRows={rowCount}
           rowHeight={32}
-          filtersHeight={32}
           onRangeChange={isChunked ? handleVisibleRangeChange : undefined}
-          filtersRow={
-            showFilters && colsState.length > 0 ? (
-              <>
-                {colsState.map((c, i) => (
-                  <FilterInput
-                    key={i}
-                    id={`filter-input-${i}`}
-                    placeholder={`Filter ${c.name}`}
-                    ariaLabel={`Filter ${c.name}`}
-                    value={filters[i] ?? ""}
-                    onChange={(value) =>
-                      setFilters((f) => ({ ...f, [i]: value }))
-                    }
-                    columnValues={columnValues[i] ?? []}
-                    fetchDistinctValues={
-                      isChunked
-                        ? async () => {
-                            try {
-                              const response = await fetch(
-                                `/api/db/distinct-values?column=${encodeURIComponent(c.name)}&limit=100`,
-                              );
-                              if (!response.ok)
-                                throw new Error(
-                                  "Failed to fetch distinct values",
-                                );
-                              const data = await response.json();
-                              return data.values || [];
-                            } catch (error) {
-                              console.error(
-                                "Error fetching distinct values:",
-                                error,
-                              );
-                              return [];
-                            }
-                          }
-                        : undefined
-                    }
-                  />
-                ))}
-              </>
-            ) : null
-          }
           onSelectionChange={setSelection}
           onColumnsResize={handleColumnsResize}
           onHeaderClick={toggleSort}
@@ -849,27 +657,16 @@ export function Sheet({
               );
             if (mapped.length > 0) clearCells(mapped);
           }}
-          onFocusFilter={() => {
-            const firstFilterId = `filter-input-0`;
-            if (!showFilters) {
-              setShowFilters(true);
-              requestAnimationFrame(() => {
-                const el = document.getElementById(firstFilterId);
-                if (el instanceof HTMLElement) el.focus();
-              });
-              return;
-            }
-            const el = document.getElementById(firstFilterId);
-            if (el instanceof HTMLElement) el.focus();
-          }}
           onSearchShortcut={() => setSearchOpen(true)}
           currentSearchKey={currentSearchKey}
           searchQuery={searchQuery}
           focusCellRequest={focusCellRequest}
           sortState={sort}
+          onUndo={undo}
+          onRedo={redo}
         />
       </div>
-      <div className="border-t bg-card/50 backdrop-blur supports-[backdrop-filter]:bg-card/50 px-4 py-2 text-xs flex items-center gap-3">
+      <div className="border-t border-border/50 bg-background/80 backdrop-blur-md px-4 sm:px-6 py-2 sm:py-3 text-xs flex items-center gap-3 sm:gap-4 overflow-x-auto">
         <TooltipProvider>
           <div className="flex items-center gap-3">
             <Tooltip>
@@ -881,11 +678,7 @@ export function Sheet({
                   </Badge>
                 </div>
               </TooltipTrigger>
-              <TooltipContent>
-                {visibleRowCount === rowCount
-                  ? "Total rows in dataset"
-                  : "Filtered rows / Total rows"}
-              </TooltipContent>
+              <TooltipContent>Total rows in dataset</TooltipContent>
             </Tooltip>
 
             <Separator orientation="vertical" className="h-4" />

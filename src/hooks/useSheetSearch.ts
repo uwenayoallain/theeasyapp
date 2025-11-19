@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
+import { logger } from "@/lib/logger";
 
 interface UseSheetSearchOptions {
   viewRows: string[][];
@@ -17,7 +18,7 @@ export function useSheetSearch({
       const saved = localStorage.getItem("sheet.search");
       if (saved) return JSON.parse(saved) as string;
     } catch (err) {
-      console.warn("Failed to read search query:", err);
+      logger.warn("Failed to read search query:", err);
     }
     return "";
   };
@@ -65,7 +66,7 @@ export function useSheetSearch({
         window.history.replaceState(null, "", url.toString());
       }
     } catch (err) {
-      console.warn("Failed to persist search query:", err);
+      logger.warn("Failed to persist search query:", err);
     }
   }, [searchQuery, onSearchChange]);
 

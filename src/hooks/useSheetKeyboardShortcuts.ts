@@ -5,8 +5,10 @@ interface UseSheetKeyboardShortcutsOptions {
   onSearchOpen: () => void;
   onGoToNext: () => void;
   onGoToPrevious: () => void;
-  onToggleFilters: () => void;
+  onToggleFilters?: () => void;
   onToggleHelp: () => void;
+  onUndo?: () => void;
+  onRedo?: () => void;
 }
 
 export function useSheetKeyboardShortcuts({
@@ -16,6 +18,8 @@ export function useSheetKeyboardShortcuts({
   onGoToPrevious,
   onToggleFilters,
   onToggleHelp,
+  onUndo,
+  onRedo,
 }: UseSheetKeyboardShortcutsOptions) {
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -47,6 +51,23 @@ export function useSheetKeyboardShortcuts({
         return;
       }
 
+      // Global undo/redo when grid may not have focus
+      if (mod && !isTyping) {
+        if (key === "z" && !event.shiftKey && onUndo) {
+          event.preventDefault();
+          onUndo();
+          return;
+        }
+        if (
+          (key === "z" && event.shiftKey && onRedo) ||
+          (key === "y" && onRedo)
+        ) {
+          event.preventDefault();
+          onRedo?.();
+          return;
+        }
+      }
+
       if (!mod && key === "/" && !isTyping) {
         event.preventDefault();
         onSearchOpen();
@@ -63,7 +84,13 @@ export function useSheetKeyboardShortcuts({
         return;
       }
 
-      if (mod && event.shiftKey && key === "f" && !isTyping) {
+      if (
+        onToggleFilters &&
+        mod &&
+        event.shiftKey &&
+        key === "f" &&
+        !isTyping
+      ) {
         event.preventDefault();
         onToggleFilters();
         return;
@@ -79,5 +106,7 @@ export function useSheetKeyboardShortcuts({
     onGoToPrevious,
     onToggleFilters,
     onToggleHelp,
+    onUndo,
+    onRedo,
   ]);
 }

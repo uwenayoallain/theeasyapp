@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
 import { useDebouncedValue } from "@/lib/useDebouncedValue";
+import { logger } from "@/lib/logger";
 
 interface UseSheetFiltersOptions {
   initialFiltersParam?: string;
@@ -38,7 +39,7 @@ export function useSheetFilters({
         return out;
       }
     } catch (err) {
-      console.warn("Failed to restore filters:", err);
+      logger.warn("Failed to restore filters:", err);
     }
     return {};
   };
@@ -55,7 +56,7 @@ export function useSheetFilters({
     try {
       return localStorage.getItem("sheet.filters.visible") === "1";
     } catch (err) {
-      console.warn("Failed to read filters visibility:", err);
+      logger.warn("Failed to read filters visibility:", err);
       return false;
     }
   });
@@ -64,7 +65,7 @@ export function useSheetFilters({
     try {
       localStorage.setItem("sheet.filters.visible", showFilters ? "1" : "0");
     } catch (err) {
-      console.warn("Failed to save filters visibility:", err);
+      logger.warn("Failed to save filters visibility:", err);
     }
   }, [showFilters]);
 
@@ -88,7 +89,7 @@ export function useSheetFilters({
         window.history.replaceState(null, "", url.toString());
       }
     } catch (err) {
-      console.warn("Failed to persist filters:", err);
+      logger.warn("Failed to persist filters:", err);
     }
   }, [debouncedFilters, onSearchChange]);
 

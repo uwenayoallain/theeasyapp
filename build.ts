@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 import plugin from "bun-plugin-tailwind";
 import { existsSync } from "fs";
-import { rm } from "fs/promises";
+import { rm, readFile, writeFile } from "fs/promises";
+import { gzipSync, brotliCompressSync } from "node:zlib";
 import path from "path";
 
 if (process.argv.includes("--help") || process.argv.includes("-h")) {
@@ -115,7 +116,9 @@ const formatFileSize = (bytes: number): string => {
 
 console.log("\n🚀 Starting build process...\n");
 
-const cliConfig = parseArgs();
+type BuildCliConfig = Partial<Bun.BuildConfig> & { compress?: boolean };
+
+const cliConfig: BuildCliConfig = parseArgs();
 const outdir =
   typeof cliConfig.outdir === "string" && cliConfig.outdir.length > 0
     ? cliConfig.outdir
@@ -173,3 +176,36 @@ console.table(outputTable);
 const buildTime = (end - start).toFixed(2);
 
 console.log(`\n✅ Build completed in ${buildTime}ms\n`);
+
+const shouldCompressAssets =
+  process.env.NODE_ENV === "production" || Boolean(cliConfig.compress);
+
+if (shouldCompressAssets) {
+  console.log("🗜️  Compressing static assets...");
+  const assetsToCompress = [...result.outputs, ...workerResult.outputs].filter(
+    (output) => output.kind === "entry-point" || output.kind === "chunk",
+  );
+
+  let compressed = 0;
+  for (const asset of assetsToCompress) {
+    try {
+      const content = await readFile(asset.path);
+
+      const gzipped = gzipSync(content, { level: 9 });
+      await writeFile(`${asset.path}.gz`, gzipped);
+
+      const brotli = brotliCompressSync(content, {
+        params: {
+          [0]: 11,
+        },
+      });
+      await writeFile(`${asset.path}.br`, brotli);
+
+      compressed++;
+      console.log(`  ✓ ${path.relative(process.cwd(), asset.path)}`);
+    } catch (err) {
+      console.warn(`  ✗ Failed to compress ${asset.path}:`, err);
+    }
+  }
+  console.log(`✅ Compressed ${compressed} asset(s)\n`);
+}

@@ -1,12 +1,13 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { DEFAULT_DUCKDB_TABLE } from "@/constants/duckdb";
 import type { ColumnDef } from "@/lib/csv";
-import { fetchAndParseCSV, parseCSVFile } from "@/lib/csvParser";
+import { parseCSVFile } from "@/lib/csvParser";
 import { parseExcelFile } from "@/lib/excelParser";
 import { isExcelFile } from "@/lib/validators";
 import { csvEvent } from "@/lib/perf";
 import { useToast } from "@/components/ui/toast-provider";
 import { sanitizeTableName } from "@/lib/duckdb-utils";
+import { logger } from "@/lib/logger";
 
 const MAX_BUFFER_SIZE = 10000;
 const MAX_FILE_SIZE = 500 * 1024 * 1024;
@@ -25,7 +26,7 @@ function createWorker(path: string, fallbackName: string): Worker | null {
   try {
     return new Worker(path, { type: "module" });
   } catch (error) {
-    console.warn(`${fallbackName} worker unavailable:`, error);
+    logger.warn(`${fallbackName} worker unavailable:`, error);
     return null;
   }
 }
@@ -150,6 +151,9 @@ export function useCSVLoader() {
     pendingBatchId: number | null;
     isPaused: boolean;
   } | null>(null);
+  // Persist status
+  const pendingWritesRef = useRef(0);
+  const [pendingWrites, setPendingWrites] = useState(0);
 
   const persistDuckDBUpdates = useCallback(
     async (
@@ -158,6 +162,8 @@ export function useCSVLoader() {
       if (!duckdbClientRef.current || mutations.length === 0) return;
       const columns = columnsRef.current;
       const table = duckdbTableRef.current;
+      pendingWritesRef.current += 1;
+      setPendingWrites(pendingWritesRef.current);
       const updates = mutations
         .map(({ rowIndex, colIndex, value }) => {
           const columnName = columns[colIndex]?.name;
@@ -170,8 +176,19 @@ export function useCSVLoader() {
           ): update is { rowIndex: number; column: string; value: string } =>
             update !== null,
         );
-      if (updates.length === 0) return;
-      await mutateTable({ table, updates });
+      if (updates.length === 0) {
+        pendingWritesRef.current = Math.max(0, pendingWritesRef.current - 1);
+        setPendingWrites(pendingWritesRef.current);
+        return;
+      }
+      await mutateTable({ table, updates })
+        .catch((err) => {
+          throw err;
+        })
+        .finally(() => {
+          pendingWritesRef.current = Math.max(0, pendingWritesRef.current - 1);
+          setPendingWrites(pendingWritesRef.current);
+        });
       const affectedRows = updates.map((update) => update.rowIndex);
       duckdbClientRef.current.worker.postMessage({
         type: "invalidate",
@@ -187,6 +204,82 @@ export function useCSVLoader() {
     [],
   );
 
+  // Undo/Redo support
+  type CellMutation = {
+    rowIndex: number;
+    colIndex: number;
+    prev: string;
+    next: string;
+  };
+  const undoStackRef = useRef<CellMutation[][]>([]);
+  const redoStackRef = useRef<CellMutation[][]>([]);
+  const [historyCounts, setHistoryCounts] = useState({ undo: 0, redo: 0 });
+  const COALESCE_WINDOW_MS = 600;
+  const pendingUndoGroupRef = useRef<CellMutation[] | null>(null);
+  const coalesceTimerRef = useRef<number | null>(null);
+
+  const flushCoalescedUndo = useCallback(() => {
+    const tx = pendingUndoGroupRef.current;
+    if (tx && tx.length > 0) {
+      undoStackRef.current.push(tx);
+      redoStackRef.current = [];
+      setHistoryCounts({ undo: undoStackRef.current.length, redo: 0 });
+    }
+    pendingUndoGroupRef.current = null;
+    if (coalesceTimerRef.current != null) {
+      if (typeof window !== "undefined")
+        window.clearTimeout(coalesceTimerRef.current);
+      coalesceTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleCoalescedUndo = useCallback(
+    (m: CellMutation) => {
+      const group = pendingUndoGroupRef.current ?? [];
+      group.push(m);
+      pendingUndoGroupRef.current = group;
+      if (coalesceTimerRef.current != null) {
+        if (typeof window !== "undefined")
+          window.clearTimeout(coalesceTimerRef.current);
+      }
+      if (typeof window !== "undefined") {
+        coalesceTimerRef.current = window.setTimeout(() => {
+          flushCoalescedUndo();
+        }, COALESCE_WINDOW_MS);
+      }
+    },
+    [flushCoalescedUndo],
+  );
+
+  const pushUndo = useCallback((tx: CellMutation[]) => {
+    if (tx.length === 0) return;
+    undoStackRef.current.push(tx);
+    // Clear redo history on new user edit
+    redoStackRef.current = [];
+    setHistoryCounts({ undo: undoStackRef.current.length, redo: 0 });
+  }, []);
+
+  const applyMutationsToState = useCallback(
+    (
+      mutations: Array<{ rowIndex: number; colIndex: number; value: string }>,
+    ) => {
+      setState((prev) => {
+        const nextRows = prev.rows.slice();
+        for (const { rowIndex, colIndex, value } of mutations) {
+          if (nextRows.length <= rowIndex) nextRows.length = rowIndex + 1;
+          const row = nextRows[rowIndex]
+            ? nextRows[rowIndex]!.slice()
+            : ([] as string[]);
+          if (colIndex >= row.length) row.length = colIndex + 1;
+          row[colIndex] = value ?? "";
+          nextRows[rowIndex] = row;
+        }
+        return { ...prev, rows: nextRows };
+      });
+    },
+    [],
+  );
+
   const cleanupWorker = useCallback((worker: Worker | null) => {
     if (!worker) return;
     try {
@@ -194,7 +287,7 @@ export function useCSVLoader() {
       worker.onerror = null;
       worker.terminate();
     } catch (error) {
-      console.warn("useCSVLoader: failed to cleanup worker", error);
+      logger.warn("useCSVLoader: failed to cleanup worker", error);
     }
   }, []);
 
@@ -243,6 +336,11 @@ export function useCSVLoader() {
 
   const loadSource = useCallback(
     async (source: LoadSource) => {
+      // Reset edit history when loading a new source
+      flushCoalescedUndo();
+      undoStackRef.current = [];
+      redoStackRef.current = [];
+      setHistoryCounts({ undo: 0, redo: 0 });
       const isDuckDB = source.type === "duckdb";
       const progressUnit: "bytes" | "rows" = isDuckDB ? "rows" : "bytes";
 
@@ -404,7 +502,7 @@ export function useCSVLoader() {
         duckdbLoadedRowsRef.current = new Set();
 
         worker.onerror = (event: ErrorEvent) => {
-          console.error(
+          logger.error(
             "DuckDB table worker error:",
             event.error ?? event.message,
           );
@@ -619,7 +717,7 @@ export function useCSVLoader() {
             try {
               worker.terminate();
             } catch (terminateError) {
-              console.warn(
+              logger.warn(
                 "useCSVLoader: failed to terminate DuckDB table worker",
                 terminateError,
               );
@@ -630,7 +728,7 @@ export function useCSVLoader() {
             if (error instanceof DOMException && error.name === "AbortError") {
               setState((prev) => ({ ...prev, isLoading: false }));
             } else {
-              console.error("DuckDB load error:", error);
+              logger.error("DuckDB load error:", error);
               setState((prev) => ({
                 ...prev,
                 error:
@@ -684,12 +782,12 @@ export function useCSVLoader() {
           setState((prev) => ({ ...prev, isLoading: false }));
         } catch (error) {
           if (error instanceof DOMException && error.name === "AbortError") {
-            console.warn(
+            logger.warn(
               "useCSVLoader: initial DuckDB range fetch aborted",
               error,
             );
           } else {
-            console.error(
+            logger.error(
               "useCSVLoader: initial DuckDB range fetch failed",
               error,
             );
@@ -783,9 +881,11 @@ export function useCSVLoader() {
                 case "done": {
                   const endTime = performance.now();
                   flushStreamingRows();
-                  console.log(
-                    `CSV streamed in ${(endTime - startTime).toFixed(2)}ms`,
-                  );
+                  if (process.env.NODE_ENV !== "production") {
+                    logger.log(
+                      `CSV streamed in ${(endTime - startTime).toFixed(2)}ms`,
+                    );
+                  }
                   csvEvent("done", { ms: endTime - startTime });
                   setState((prev) => ({ ...prev, isLoading: false }));
                   streamingStateRef.current = null;
@@ -812,7 +912,7 @@ export function useCSVLoader() {
                   workerRef.current = null;
                   break;
                 default:
-                  console.warn("useCSVLoader: unknown worker message", data);
+                  logger.warn("useCSVLoader: unknown worker message", data);
               }
             };
             w.postMessage({
@@ -826,6 +926,19 @@ export function useCSVLoader() {
         }
 
         streamingStateRef.current = null;
+
+        // Force all remote URLs to use DuckDB for consistent data persistence
+        if (source.url) {
+          showToast({
+            title: "Loading into database",
+            description:
+              "Remote CSV files are automatically loaded into DuckDB for better performance and persistence.",
+          });
+
+          // Convert to DuckDB source and reload
+          return loadSource({ type: "duckdb", url: source.url });
+        }
+
         let result;
         const file = source.file;
         if (file) {
@@ -839,16 +952,16 @@ export function useCSVLoader() {
             ...prev,
             progress: { loaded: file.size, unit: "bytes" },
           }));
-        } else if (source.url) {
-          result = await fetchAndParseCSV(source.url);
         } else {
           throw new Error("No source provided");
         }
         const endTime = performance.now();
         const fileType = file && isExcelFile(file.name) ? "Excel" : "CSV";
-        console.log(
-          `${fileType} parsed in ${(endTime - startTime).toFixed(2)}ms`,
-        );
+        if (process.env.NODE_ENV !== "production") {
+          logger.log(
+            `${fileType} parsed in ${(endTime - startTime).toFixed(2)}ms`,
+          );
+        }
         csvEvent("done", { ms: endTime - startTime });
         const loadedRowIndices = Array.from(
           { length: result.rows.length },
@@ -869,13 +982,13 @@ export function useCSVLoader() {
           loadedRowIndices,
         });
       } catch (error) {
-        console.error("CSV loading error:", error);
+        logger.error("CSV loading error:", error);
         streamingStateRef.current = null;
         if (workerRef.current) {
           try {
             workerRef.current.terminate();
           } catch (terminateError) {
-            console.warn(
+            logger.warn(
               "useCSVLoader: failed to terminate CSV worker after error",
               terminateError,
             );
@@ -889,7 +1002,7 @@ export function useCSVLoader() {
         }));
       }
     },
-    [flushStreamingRows, showToast, cleanupWorker],
+    [cleanupWorker, flushCoalescedUndo, flushStreamingRows, showToast],
   );
 
   const cancel = useCallback(() => {
@@ -898,7 +1011,7 @@ export function useCSVLoader() {
       try {
         workerRef.current.postMessage({ type: "abort" });
       } catch (error) {
-        console.warn(
+        logger.warn(
           "useCSVLoader: failed to signal abort to CSV worker",
           error,
         );
@@ -919,6 +1032,11 @@ export function useCSVLoader() {
 
   const reset = useCallback(() => {
     flushStreamingRows();
+    // Clear edit history
+    flushCoalescedUndo();
+    undoStackRef.current = [];
+    redoStackRef.current = [];
+    setHistoryCounts({ undo: 0, redo: 0 });
     setState({
       columns: [],
       rows: [],
@@ -941,7 +1059,7 @@ export function useCSVLoader() {
     }
     duckdbLoadedRowsRef.current = new Set();
     ensureRangeRef.current = null;
-  }, [flushStreamingRows, cleanupWorker]);
+  }, [flushCoalescedUndo, flushStreamingRows, cleanupWorker]);
 
   const setFiltersAndSort = useCallback(
     async (
@@ -977,7 +1095,7 @@ export function useCSVLoader() {
         try {
           await ensureRangeRef.current(0, client.chunkSize - 1);
         } catch (error) {
-          console.error("Failed to fetch filtered data:", error);
+          logger.error("Failed to fetch filtered data:", error);
         }
       }
     },
@@ -990,28 +1108,87 @@ export function useCSVLoader() {
     reset,
     cancel,
     setFiltersAndSort,
+    currentTable: duckdbTableRef.current,
     ensureRange: (start: number, end: number) =>
       ensureRangeRef.current
         ? ensureRangeRef.current(start, end)
         : Promise.resolve(),
+    isSaving: pendingWrites > 0,
+    savingCount: pendingWrites,
+    canUndo: historyCounts.undo > 0,
+    canRedo: historyCounts.redo > 0,
+    undo: async () => {
+      // Ensure pending coalesced edits become a committed undo step
+      flushCoalescedUndo();
+      const tx = undoStackRef.current.pop();
+      if (!tx || tx.length === 0) return;
+      const mutations = tx.map(({ rowIndex, colIndex, prev }) => ({
+        rowIndex,
+        colIndex,
+        value: prev ?? "",
+      }));
+      applyMutationsToState(mutations);
+      if (duckdbClientRef.current) {
+        try {
+          await persistDuckDBUpdates(mutations);
+        } catch (err) {
+          logger.error("DuckDB undo mutation error:", err);
+        }
+      }
+      redoStackRef.current.push(tx);
+      setHistoryCounts({
+        undo: undoStackRef.current.length,
+        redo: redoStackRef.current.length,
+      });
+    },
+    redo: async () => {
+      const tx = redoStackRef.current.pop();
+      if (!tx || tx.length === 0) return;
+      const mutations = tx.map(({ rowIndex, colIndex, next }) => ({
+        rowIndex,
+        colIndex,
+        value: next ?? "",
+      }));
+      applyMutationsToState(mutations);
+      if (duckdbClientRef.current) {
+        try {
+          await persistDuckDBUpdates(mutations);
+        } catch (err) {
+          logger.error("DuckDB redo mutation error:", err);
+        }
+      }
+      undoStackRef.current.push(tx);
+      setHistoryCounts({
+        undo: undoStackRef.current.length,
+        redo: redoStackRef.current.length,
+      });
+    },
     updateCell: (rowIndex: number, colIndex: number, value: string) => {
       const normalizedValue = value ?? "";
+      let prevValue = "";
       setState((prev) => {
         const nextRows = prev.rows.slice();
         if (nextRows.length <= rowIndex) nextRows.length = rowIndex + 1;
         const row = nextRows[rowIndex]
           ? nextRows[rowIndex]!.slice()
           : ([] as string[]);
+        prevValue = row[colIndex] ?? "";
         if (colIndex >= row.length) row.length = colIndex + 1;
         row[colIndex] = normalizedValue;
         nextRows[rowIndex] = row;
         return { ...prev, rows: nextRows };
       });
+      scheduleCoalescedUndo({
+        rowIndex,
+        colIndex,
+        prev: prevValue,
+        next: normalizedValue,
+      });
       if (duckdbClientRef.current) {
         persistDuckDBUpdates([
           { rowIndex, colIndex, value: normalizedValue },
         ]).catch((err) => {
-          console.error("DuckDB mutation error:", err);
+          logger.error("DuckDB mutation error:", err);
           setState((prev) => ({
             ...prev,
             error:
@@ -1024,6 +1201,7 @@ export function useCSVLoader() {
       const normalized: string[][] = values.map(
         (row) => row.map((cell) => cell ?? "") as string[],
       );
+      const tx: CellMutation[] = [];
       setState((prev) => {
         const nextRows = prev.rows.slice();
         for (let rOff = 0; rOff < normalized.length; rOff++) {
@@ -1035,33 +1213,36 @@ export function useCSVLoader() {
             : ([] as string[]);
           for (let cOff = 0; cOff < src.length; cOff++) {
             const cIndex = startCol + cOff;
+            const prevVal = row[cIndex] ?? "";
             if (cIndex >= row.length) row.length = cIndex + 1;
             row[cIndex] = src[cOff] ?? "";
+            tx.push({
+              rowIndex: rIndex,
+              colIndex: cIndex,
+              prev: prevVal,
+              next: src[cOff] ?? "",
+            });
           }
           nextRows[rIndex] = row;
         }
         return { ...prev, rows: nextRows };
       });
+      pushUndo(tx);
       if (duckdbClientRef.current) {
         const mutations: Array<{
           rowIndex: number;
           colIndex: number;
           value: string;
         }> = [];
-        for (let rOff = 0; rOff < normalized.length; rOff++) {
-          const rIndex = startRow + rOff;
-          const src = (normalized[rOff] ?? []) as string[];
-          for (let cOff = 0; cOff < src.length; cOff++) {
-            const cIndex = startCol + cOff;
-            mutations.push({
-              rowIndex: rIndex,
-              colIndex: cIndex,
-              value: src[cOff] ?? "",
-            });
-          }
+        for (const m of tx) {
+          mutations.push({
+            rowIndex: m.rowIndex,
+            colIndex: m.colIndex,
+            value: m.next,
+          });
         }
         persistDuckDBUpdates(mutations).catch((err) => {
-          console.error("DuckDB mutation error:", err);
+          logger.error("DuckDB mutation error:", err);
           setState((prev) => ({
             ...prev,
             error:
@@ -1074,6 +1255,7 @@ export function useCSVLoader() {
     },
     clearCells: (cells: Array<{ row: number; col: number }>) => {
       if (cells.length === 0) return;
+      const tx: CellMutation[] = [];
       setState((prev) => {
         const nextRows = prev.rows.slice();
         const touched = new Map<number, number[]>();
@@ -1087,20 +1269,30 @@ export function useCSVLoader() {
             ? nextRows[rIndex]!.slice()
             : ([] as string[]);
           for (const col of cols) {
-            if (col < row.length) row[col] = "";
+            if (col < row.length) {
+              const prevVal = row[col] ?? "";
+              row[col] = "";
+              tx.push({
+                rowIndex: rIndex,
+                colIndex: col,
+                prev: prevVal,
+                next: "",
+              });
+            }
           }
           nextRows[rIndex] = row;
         }
         return { ...prev, rows: nextRows };
       });
+      pushUndo(tx);
       if (duckdbClientRef.current) {
-        const mutations = cells.map(({ row, col }) => ({
-          rowIndex: row,
-          colIndex: col,
-          value: "",
+        const mutations = tx.map(({ rowIndex, colIndex, next }) => ({
+          rowIndex,
+          colIndex,
+          value: next,
         }));
         persistDuckDBUpdates(mutations).catch((err) => {
-          console.error("DuckDB mutation error:", err);
+          logger.error("DuckDB mutation error:", err);
           setState((prev) => ({
             ...prev,
             error: err instanceof Error ? err.message : "Failed to clear cells",

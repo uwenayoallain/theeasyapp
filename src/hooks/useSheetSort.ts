@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
+import { logger } from "@/lib/logger";
 
 type SortState = { colIndex: number; dir: "asc" | "desc" } | null;
 
@@ -32,7 +33,7 @@ export function useSheetSort({
         }
       }
     } catch (err) {
-      console.warn("Failed to read initial sort:", err);
+      logger.warn("Failed to read initial sort:", err);
     }
     return null;
   };
@@ -52,7 +53,7 @@ export function useSheetSort({
         window.history.replaceState(null, "", url.toString());
       }
     } catch (err) {
-      console.warn("Failed to persist sort:", err);
+      logger.warn("Failed to persist sort:", err);
     }
   }, [sort, onSearchChange]);
 

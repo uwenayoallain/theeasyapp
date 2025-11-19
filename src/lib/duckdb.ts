@@ -6,6 +6,8 @@ import { existsSync, mkdirSync } from "node:fs";
 import { unlink } from "node:fs/promises";
 import { buildWhereClause } from "./filterPredicateSQL";
 import { escapeIdentifier, escapeLiteral, isNumericType } from "./duckdb-utils";
+import { isExcelFile, isCSVFile } from "./validators";
+import { parseExcelFile } from "./excelParser";
 
 const DEFAULT_TABLE = DEFAULT_DUCKDB_TABLE;
 const SAMPLE_CSV = fileURLToPath(
@@ -15,13 +17,25 @@ const DB_FILE = Bun.env.DUCKDB_DATABASE ?? ":memory:";
 const TEMP_DIR = Bun.env.DUCKDB_TMP_DIR ?? join(process.cwd(), ".duckdb-tmp");
 const DUCKDB_THREADS = Number(Bun.env.DUCKDB_THREADS || "4");
 const DUCKDB_MEMORY = Bun.env.DUCKDB_MEMORY || "1GB";
+const DUCKDB_PRESERVE_INSERTION_ORDER =
+  Bun.env.DUCKDB_PRESERVE_INSERTION_ORDER === "false" ? false : true;
+const MAX_CONNECTIONS = Number(Bun.env.DUCKDB_MAX_CONNECTIONS || "3");
 
 const database = new Database(DB_FILE);
 const MAX_CHUNK_SIZE = 10000;
 
-let connection: Connection | null = null;
+const connections: Connection[] = [];
+let connectionIndex = 0;
 let queue: Promise<unknown> = Promise.resolve();
 let initPromise: Promise<void> | null = null;
+
+const tableColumnsCache = new Map<string, DuckDBColumnMeta[]>();
+const tableColumnsPending = new Map<string, Promise<DuckDBColumnMeta[]>>();
+const tableRowCountCache = new Map<
+  string,
+  { count: number; timestamp: number }
+>();
+const ROW_COUNT_CACHE_TTL = 30000;
 
 function ensureTempDir() {
   if (!existsSync(TEMP_DIR)) {
@@ -30,10 +44,14 @@ function ensureTempDir() {
 }
 
 function getConnection(): Connection {
-  if (!connection) {
-    connection = database.connect();
+  if (connections.length === 0) {
+    for (let i = 0; i < MAX_CONNECTIONS; i++) {
+      connections.push(database.connect());
+    }
   }
-  return connection;
+  const conn = connections[connectionIndex % connections.length]!;
+  connectionIndex = (connectionIndex + 1) % connections.length;
+  return conn;
 }
 
 function enqueue<T>(task: (conn: Connection) => Promise<T>): Promise<T> {
@@ -103,7 +121,10 @@ export interface DuckDBTableChunk {
   limit: number;
 }
 
-type CsvSource = { path: string } | { url: string } | { blob: Blob };
+type DataSource =
+  | { path: string; name?: string }
+  | { url: string; name?: string }
+  | { blob: Blob; name?: string };
 
 export interface DuckDBCellUpdate {
   rowIndex: number;
@@ -125,6 +146,9 @@ export async function loadCsvIntoTable(
       conn,
       `CREATE OR REPLACE TABLE ${tableIdent} AS SELECT * FROM read_csv_auto('${csvLiteral}', HEADER=TRUE)`,
     );
+    // Invalidate cached metadata for this table since schema may change
+    tableColumnsCache.delete(tableName);
+    tableColumnsPending.delete(tableName);
   });
 }
 
@@ -135,6 +159,12 @@ export async function initDuckDB(): Promise<void> {
       await run(conn, `SET threads TO ${DUCKDB_THREADS}`);
       await run(conn, `SET memory_limit = '${DUCKDB_MEMORY}'`);
       await run(conn, "SET enable_progress_bar = true");
+      await run(
+        conn,
+        "SET preserve_insertion_order = " +
+          (DUCKDB_PRESERVE_INSERTION_ORDER ? "true" : "false"),
+      );
+      await run(conn, "SET enable_object_cache = true");
     });
 
     await loadCsvIntoTable(SAMPLE_CSV);
@@ -148,17 +178,24 @@ export async function initDuckDB(): Promise<void> {
 export async function getTableColumns(
   tableName: string = DEFAULT_TABLE,
 ): Promise<DuckDBColumnMeta[]> {
+  const cached = tableColumnsCache.get(tableName);
+  if (cached) return cached;
+  const pending = tableColumnsPending.get(tableName);
+  if (pending) return pending;
+
   const tableIdent = escapeIdentifier(tableName);
-  return enqueue(async (conn) => {
+  const promise = enqueue(async (conn) => {
     const rows = await all<{ name: string; type: string }>(
       conn,
       `PRAGMA table_info(${tableIdent})`,
     );
-    return rows.map((row) => ({
-      name: row.name,
-      type: row.type,
-    }));
+    const cols = rows.map((row) => ({ name: row.name, type: row.type }));
+    tableColumnsCache.set(tableName, cols);
+    tableColumnsPending.delete(tableName);
+    return cols;
   });
+  tableColumnsPending.set(tableName, promise);
+  return promise;
 }
 
 export async function getDistinctValues(
@@ -189,13 +226,20 @@ export async function getDistinctValues(
 export async function getTableRowCount(
   tableName: string = DEFAULT_TABLE,
 ): Promise<number> {
+  const cached = tableRowCountCache.get(tableName);
+  if (cached && Date.now() - cached.timestamp < ROW_COUNT_CACHE_TTL) {
+    return cached.count;
+  }
+
   const tableIdent = escapeIdentifier(tableName);
   return enqueue(async (conn) => {
     const rows = await all<{ count: number }>(
       conn,
       `SELECT COUNT(*) AS count FROM ${tableIdent}`,
     );
-    return Number(rows[0]?.count ?? 0);
+    const count = Number(rows[0]?.count ?? 0);
+    tableRowCountCache.set(tableName, { count, timestamp: Date.now() });
+    return count;
   });
 }
 
@@ -349,17 +393,70 @@ async function writeBlobToTempFile(
   return tempPath;
 }
 
+async function writeCSVToTempFileFromExcelBlob(blob: Blob): Promise<string> {
+  // Parse Excel and write a temp CSV that DuckDB can ingest
+  ensureTempDir();
+  const { columns, rows } = await parseExcelFile(
+    new File([await blob.arrayBuffer()], "upload.xlsx"),
+  );
+  const header = columns.map((c) => c.name.replace(/"/g, "")).join(",");
+  const csvLines = [
+    header,
+    ...rows.map((r) =>
+      r
+        .map((cell) => String(cell ?? ""))
+        .map((v) =>
+          v.includes(",") || v.includes("\n") || v.includes('"')
+            ? `"${v.replaceAll('"', '""')}"`
+            : v,
+        )
+        .join(","),
+    ),
+  ];
+  const tempPath = join(
+    TEMP_DIR,
+    `${Date.now()}-${Math.random().toString(16).slice(2)}.csv`,
+  );
+  await Bun.write(tempPath, csvLines.join("\n"));
+  return tempPath;
+}
+
 export async function loadCsvFromSource(
-  source: CsvSource,
+  source: DataSource,
   tableName: string = DEFAULT_TABLE,
 ): Promise<{ columns: DuckDBColumnMeta[]; rowCount: number }> {
   let tempPath: string | null = null;
   try {
     if ("path" in source) {
-      await loadCsvIntoTable(source.path, tableName);
+      const isExcel = source.name
+        ? isExcelFile(source.name)
+        : isExcelFile(source.path);
+      if (isExcel) {
+        // Read path into blob then convert
+        const file = Bun.file(source.path);
+        const buf = await file.arrayBuffer();
+        const csvPath = await writeCSVToTempFileFromExcelBlob(new Blob([buf]));
+        tempPath = csvPath;
+        await loadCsvIntoTable(csvPath, tableName);
+      } else {
+        await loadCsvIntoTable(source.path, tableName);
+      }
     } else if ("blob" in source) {
-      tempPath = await writeBlobToTempFile(source.blob);
-      await loadCsvIntoTable(tempPath, tableName);
+      const extension = source.name
+        ? isExcelFile(source.name)
+          ? ".xlsx"
+          : isCSVFile(source.name)
+            ? ".csv"
+            : ".csv"
+        : ".csv";
+      if (extension === ".xlsx") {
+        const csvPath = await writeCSVToTempFileFromExcelBlob(source.blob);
+        tempPath = csvPath;
+        await loadCsvIntoTable(csvPath, tableName);
+      } else {
+        tempPath = await writeBlobToTempFile(source.blob, extension);
+        await loadCsvIntoTable(tempPath, tableName);
+      }
     } else if ("url" in source) {
       if (!isHttpUrl(source.url)) {
         throw new Error("Only http(s) URLs are supported");
@@ -369,8 +466,17 @@ export async function loadCsvFromSource(
         throw new Error(`Failed to fetch CSV (${response.status})`);
       }
       const blob = await response.blob();
-      tempPath = await writeBlobToTempFile(blob);
-      await loadCsvIntoTable(tempPath, tableName);
+      const isExcel = source.name
+        ? isExcelFile(source.name)
+        : /\.xlsx?$/.test(new URL(source.url).pathname.toLowerCase());
+      if (isExcel) {
+        const csvPath = await writeCSVToTempFileFromExcelBlob(blob);
+        tempPath = csvPath;
+        await loadCsvIntoTable(csvPath, tableName);
+      } else {
+        tempPath = await writeBlobToTempFile(blob);
+        await loadCsvIntoTable(tempPath, tableName);
+      }
     } else {
       throw new Error("Unsupported CSV source");
     }
@@ -383,4 +489,66 @@ export async function loadCsvFromSource(
       await unlink(tempPath).catch(() => undefined);
     }
   }
+}
+
+export async function listTables(): Promise<string[]> {
+  return enqueue(async (conn) => {
+    const rows = await all<{ name: string }>(conn, "SHOW TABLES");
+    return rows
+      .map((r) => String(r.name))
+      .filter((n) => n && n.trim().length > 0);
+  });
+}
+
+export async function getTableInfo(tableName: string = DEFAULT_TABLE): Promise<{
+  name: string;
+  columns: DuckDBColumnMeta[];
+  rowCount: number;
+}> {
+  const columns = await getTableColumns(tableName);
+  const rowCount = await getTableRowCount(tableName);
+  return { name: tableName, columns, rowCount };
+}
+
+export async function loadMultipleSources(
+  sources: Array<{ source: DataSource; table: string }>,
+): Promise<
+  Array<{ table: string; columns: DuckDBColumnMeta[]; rowCount: number }>
+> {
+  const results: Array<{
+    table: string;
+    columns: DuckDBColumnMeta[];
+    rowCount: number;
+  }> = [];
+  for (const item of sources) {
+    const res = await loadCsvFromSource(item.source, item.table);
+    results.push({
+      table: item.table,
+      columns: res.columns,
+      rowCount: res.rowCount,
+    });
+  }
+  return results;
+}
+
+export async function dropTables(tables: string[]): Promise<number> {
+  const unique = Array.from(new Set(tables.map((t) => t).filter(Boolean)));
+  if (unique.length === 0) return 0;
+  return enqueue(async (conn) => {
+    await run(conn, "BEGIN TRANSACTION");
+    try {
+      for (const name of unique) {
+        const ident = escapeIdentifier(name);
+        await run(conn, `DROP TABLE IF EXISTS ${ident}`);
+        // Invalidate cache entries
+        tableColumnsCache.delete(name);
+        tableColumnsPending.delete(name);
+      }
+      await run(conn, "COMMIT");
+      return unique.length;
+    } catch (error) {
+      await run(conn, "ROLLBACK");
+      throw error;
+    }
+  });
 }

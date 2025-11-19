@@ -4,6 +4,7 @@ import {
   useCallback,
   useRef,
   useEffect,
+  useMemo,
   type ReactNode,
 } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
@@ -19,6 +20,9 @@ import { cn } from "@/lib/utils";
 import { recordCommit } from "@/lib/perf";
 import { selectionToTSV } from "@/lib/export";
 import { clamp } from "@/lib/math-utils";
+import { logger } from "@/lib/logger";
+import { SkeletonGrid } from "./SkeletonGrid";
+import { Hash, Type, Calendar, Tag, Loader2 } from "lucide-react";
 
 interface SelectedCell {
   row: number;
@@ -54,6 +58,9 @@ interface DataGridProps {
   headerHeight?: number;
   totalRows?: number;
   onRangeChange?: (range: { startIndex: number; endIndex: number }) => void;
+  isLoadingChunks?: boolean;
+  onUndo?: () => void;
+  onRedo?: () => void;
 }
 
 export function DataGrid({
@@ -77,6 +84,9 @@ export function DataGrid({
   headerHeight = 32,
   totalRows,
   onRangeChange,
+  isLoadingChunks = false,
+  onUndo,
+  onRedo,
 }: DataGridProps) {
   const [anchorCell, setAnchorCell] = useState<SelectedCell | null>(null);
   const [selectedCells, setSelectedCells] = useState<Set<string>>(
@@ -489,10 +499,7 @@ export function DataGrid({
                 onPaste?.(cur.row, cur.col, values);
               })
               .catch((err) => {
-                console.warn(
-                  "DataGrid: failed to read clipboard contents",
-                  err,
-                );
+                logger.warn("DataGrid: failed to read clipboard contents", err);
               });
             return;
           }
@@ -517,6 +524,23 @@ export function DataGrid({
           if (mod) {
             e.preventDefault();
             copySelection();
+            return;
+          }
+          break;
+        case "z":
+        case "Z":
+          if (mod) {
+            e.preventDefault();
+            if (e.shiftKey) onRedo?.();
+            else onUndo?.();
+            return;
+          }
+          break;
+        case "y":
+        case "Y":
+          if (mod) {
+            e.preventDefault();
+            onRedo?.();
             return;
           }
           break;
@@ -561,7 +585,9 @@ export function DataGrid({
       onEditCell,
       onFocusFilter,
       onPaste,
+      onRedo,
       onSearchShortcut,
+      onUndo,
       parseSelectionKey,
       rows,
       selectedCells,
@@ -590,7 +616,7 @@ export function DataGrid({
       aria-rowcount={columns.length > 0 ? totalRowCount + 1 : totalRowCount}
       aria-colcount={columns.length}
       aria-multiselectable="true"
-      className="relative h-full overflow-auto focus:outline-none select-none bg-background"
+      className="relative h-full overflow-auto focus:outline-none select-none bg-background scrollbar-thin scrollbar-track-transparent scrollbar-thumb-muted-foreground/20 hover:scrollbar-thumb-muted-foreground/40"
       tabIndex={0}
       onKeyDown={handleKeyDown}
       onDragStart={(e) => e.preventDefault()}
@@ -606,8 +632,8 @@ export function DataGrid({
       }}
     >
       {columns.length === 0 && (
-        <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-          <div className="text-muted-foreground text-sm">Loading data...</div>
+        <div className="absolute inset-0">
+          <SkeletonGrid columns={5} rows={15} />
         </div>
       )}
 
@@ -623,6 +649,7 @@ export function DataGrid({
           onColumnsResize={onColumnsResize}
           onHeaderClick={onHeaderClick}
           sortState={sortState ?? null}
+          sampleData={rows.slice(0, 50)}
         />
         {filtersRow && (
           <div
@@ -659,8 +686,18 @@ export function DataGrid({
             onEditCell={onEditCell}
           />
         ))}
+        {/* Progressive Loading Indicator */}
+        {isLoadingChunks && (
+          <div className="pointer-events-none absolute bottom-4 right-4 z-30">
+            <div className="pointer-events-auto flex items-center gap-2 rounded-full border border-border/60 bg-background/95 px-3 py-1.5 text-xs text-muted-foreground shadow-sm">
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+              <span>Streaming rows…</span>
+            </div>
+          </div>
+        )}
+
         <ContextMenu open={menu.open} x={menu.x} y={menu.y} onClose={closeMenu}>
-          <div className="px-2 py-1 text-xs text-muted-foreground">
+          <div className="px-3 py-2 text-xs font-medium text-muted-foreground border-b border-border/50">
             Cell actions
           </div>
           <ContextMenuItem onSelect={copyCell}>Copy cell</ContextMenuItem>
@@ -679,7 +716,7 @@ export function DataGrid({
                 const values = lines.map((l) => l.split("\t"));
                 onPaste?.(menu.cell.row, menu.cell.col, values);
               } catch (err) {
-                console.warn("DataGrid: clipboard paste failed", err);
+                logger.warn("DataGrid: clipboard paste failed", err);
               }
               closeMenu();
             }}
@@ -750,22 +787,61 @@ export function DataGrid({
   );
 }
 
+const getColumnTypeIcon = (
+  columnIndex: number,
+  _columnName: string,
+  sampleData?: string[][],
+): ReactNode => {
+  if (columnIndex === 0) return <Tag className="h-3.5 w-3.5" />;
+
+  // Check sample data for type detection
+  if (sampleData && sampleData.length > 0) {
+    const sampleValues = sampleData
+      .slice(0, Math.min(20, sampleData.length))
+      .map((row) => row[columnIndex])
+      .filter((val) => val && val.trim() !== "");
+
+    // Check if mostly numbers
+    const numericCount = sampleValues.filter(
+      (val) => val && !isNaN(Number(val)),
+    ).length;
+    if (numericCount > sampleValues.length * 0.8) {
+      return <Hash className="h-3.5 w-3.5" />;
+    }
+
+    // Check if dates
+    const dateCount = sampleValues.filter((val) => {
+      if (!val) return false;
+      const date = new Date(val);
+      return !isNaN(date.getTime()) && (val.includes("-") || val.includes("/"));
+    }).length;
+    if (dateCount > sampleValues.length * 0.6) {
+      return <Calendar className="h-3.5 w-3.5" />;
+    }
+  }
+
+  // Default to text
+  return <Type className="h-3.5 w-3.5" />;
+};
+
 const Header = memo(function Header({
   columns,
   onColumnsResize,
   onHeaderClick,
   sortState,
+  sampleData,
 }: {
   columns: ColumnDef[];
   onColumnsResize?: (cols: ColumnDef[]) => void;
   onHeaderClick?: (i: number) => void;
   sortState: SortState;
+  sampleData?: string[][];
 }) {
   if (columns.length === 0) return null;
 
   return (
     <div
-      className="sticky top-0 z-20 bg-card border-b grid select-none"
+      className="sticky top-0 z-30 bg-muted/30 backdrop-blur-sm border-b border-border/60 grid select-none shadow-[0_6px_10px_-6px_rgba(0,0,0,0.2)]"
       role="row"
       aria-rowindex={1}
       style={{
@@ -785,15 +861,25 @@ const Header = memo(function Header({
                 : "descending"
               : "none"
           }
-          className="px-2 py-1 text-sm font-medium truncate border-r last:border-r-0 relative group cursor-pointer select-none"
+          className="px-4 py-2.5 text-sm font-medium text-muted-foreground truncate relative group cursor-pointer select-none transition-colors duration-150 hover:text-foreground hover:bg-muted/20"
           onClick={() => onHeaderClick?.(i)}
         >
-          {c.name}
+          <div className="flex items-center gap-2">
+            <span className="text-muted-foreground/70">
+              {getColumnTypeIcon(i, c.name, sampleData)}
+            </span>
+            <span className="flex-1 truncate">{c.name}</span>
+            {sortState && sortState.colIndex === i && (
+              <span className="text-xs text-primary font-medium">
+                {sortState.dir === "asc" ? "↑" : "↓"}
+              </span>
+            )}
+          </div>
           {onColumnsResize && (
             <span
               role="separator"
               aria-label="Resize column"
-              className="absolute right-0 top-0 h-full w-1 cursor-col-resize select-none bg-transparent group-hover:bg-primary/20"
+              className="absolute right-0 top-0 h-full w-1 cursor-col-resize select-none bg-transparent group-hover:bg-border"
               onMouseDown={(e) => {
                 e.preventDefault();
                 const startX = e.clientX;
@@ -815,6 +901,33 @@ const Header = memo(function Header({
                 };
                 window.addEventListener("mousemove", onMove);
                 window.addEventListener("mouseup", onUp);
+              }}
+              onDoubleClick={(e) => {
+                // Autosize to content on double-click, similar to Notion.
+                e.preventDefault();
+                if (!onColumnsResize) return;
+                const col = i;
+                const visible = sampleData ?? [];
+                const sample = visible.slice(0, 200).map((r) => r?.[col] ?? "");
+                const ctx = document.createElement("canvas").getContext("2d");
+                const font = getComputedStyle(document.body).font;
+                if (ctx && font) ctx.font = font;
+                const measure = (s: string) =>
+                  ctx
+                    ? Math.ceil(ctx.measureText(s).width) + 24
+                    : Math.max(160, s.length * 8 + 24);
+                const targetColumn = columns[col];
+                if (!targetColumn) return;
+                const max = Math.max(
+                  measure(targetColumn.name),
+                  ...sample.map(measure),
+                );
+                const next = columns.slice();
+                next[col] = {
+                  ...targetColumn,
+                  width: Math.min(Math.max(60, max), 600),
+                };
+                onColumnsResize(next);
               }}
             />
           )}
@@ -901,11 +1014,22 @@ const Row = memo(function Row({
   searchQuery: string;
   onEditCell?: (row: number, col: number, value: string) => void;
 }) {
+  const hasSelectedCells = Array.from(selectedCells).some((key) =>
+    key.startsWith(`${index}:`),
+  );
+
   return (
     <div
       role="row"
       aria-rowindex={index + 2}
-      className="absolute left-0 right-0 grid border-b select-none bg-card"
+      className={cn(
+        "absolute left-0 right-0 grid select-none transition-colors duration-150 group",
+        // Subtle row divisions like Notion
+        "border-b border-border/40",
+        // Hover reveal without harsh contrast
+        "hover:bg-muted/20",
+        hasSelectedCells && "bg-primary/10",
+      )}
       style={{
         transform: `translateY(${top}px)`,
         height,
@@ -935,6 +1059,13 @@ const Row = memo(function Row({
             ? highlightValue(cellValue, searchQuery)
             : cellValue
           : null;
+        // Check if this column should be right-aligned (numbers)
+        const isNumericColumn =
+          i > 0 &&
+          cellValue &&
+          !isNaN(Number(cellValue)) &&
+          cellValue.trim() !== "";
+
         return (
           <div
             key={i}
@@ -942,13 +1073,17 @@ const Row = memo(function Row({
             aria-colindex={i + 1}
             aria-selected={isSelected}
             className={cn(
-              "px-2 py-1 text-sm truncate border-r last:border-r-0 cursor-pointer transition-colors select-none relative",
+              "px-4 py-3 text-sm truncate cursor-pointer transition-all duration-200 select-none relative",
+              // Light column separators
+              "border-r border-border/20 last:border-r-0",
+              isNumericColumn && "text-right font-mono",
               isSelected
-                ? "bg-primary/20 ring-2 ring-primary ring-inset"
-                : "hover:bg-muted/50",
+                ? "bg-primary/20 ring-1 ring-primary/50 ring-inset shadow-sm transform scale-[1.001]"
+                : "group-hover:bg-transparent hover:shadow-sm",
               isMatch && !isSelected && "bg-amber-100/60 dark:bg-amber-400/20",
               isCurrentMatch &&
-                "outline outline-2 outline-amber-500 outline-offset-[-2px]",
+                "outline outline-2 outline-amber-500 outline-offset-[-2px] shadow-md",
+              "hover:z-10",
             )}
             style={{ contain: "content" }}
             draggable={false}
@@ -969,7 +1104,11 @@ const Row = memo(function Row({
                 onChange={(e) =>
                   setEditing({ row: index, col: i, value: e.target.value })
                 }
-                className="absolute inset-0 m-0 h-full w-full rounded-none border-2 border-primary bg-background px-2 py-1 text-sm shadow-none focus-visible:ring-0"
+                className={cn(
+                  "absolute inset-0 m-0 h-full w-full rounded-md border border-primary/50 bg-background/95 backdrop-blur-sm shadow-lg focus-visible:ring-1 focus-visible:ring-primary focus-visible:border-primary transition-all duration-150",
+                  isNumericColumn ? "text-right font-mono px-4" : "px-4",
+                  "py-3 text-sm",
+                )}
                 onClick={(e) => e.stopPropagation()}
                 onMouseDown={(e) => e.stopPropagation()}
               />

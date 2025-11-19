@@ -1,5 +1,6 @@
 /* eslint-disable no-restricted-globals */
 import { parseStream } from "@/lib/streamingCSV";
+import { logger } from "@/lib/logger";
 
 type WorkerLoadRequest = {
   type: "load";
@@ -71,7 +72,7 @@ self.addEventListener(
       try {
         await currentReader?.cancel();
       } catch (error) {
-        console.warn("csvWorker: failed to cancel current reader", error);
+        logger.warn("csvWorker: failed to cancel current reader", error);
       }
       return;
     }
